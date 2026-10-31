@@ -1,0 +1,523 @@
+/* ==========================================================================
+   BugFinder AI - Modern Cyber Scanner Stylesheet
+   ========================================================================== */
+
+:root {
+  --bg-color: #080b10;
+  --panel-bg: rgba(18, 24, 38, 0.88);
+  --border-color: rgba(255, 255, 255, 0.12);
+  --primary-color: #00ffaa;
+  --primary-glow: rgba(0, 255, 170, 0.4);
+  --danger-color: #ff3366;
+  --danger-glow: rgba(255, 51, 102, 0.5);
+  --warning-color: #ffb800;
+  --text-main: #ffffff;
+  --text-dim: #94a3b8;
+  --safe-area-bottom: env(safe-area-inset-bottom, 16px);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+/* ---------------- Viewport & Video Layer ---------------- */
+.viewport-wrapper {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#cameraVideo {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform-origin: center center;
+  transition: transform 0.2s ease-out;
+}
+
+#detectionCanvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ---------------- HUD Overlay ---------------- */
+.hud-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 14px;
+}
+
+.hud-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(10, 16, 26, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-color);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning-color);
+  box-shadow: 0 0 8px var(--warning-color);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.status-badge.active .status-dot {
+  background: var(--primary-color);
+  box-shadow: 0 0 10px var(--primary-color);
+}
+
+.status-badge.alert .status-dot {
+  background: var(--danger-color);
+  box-shadow: 0 0 12px var(--danger-color);
+  animation: pulse-dot 0.8s infinite alternate;
+}
+
+@keyframes pulse-dot {
+  from { opacity: 0.4; }
+  to { opacity: 1; transform: scale(1.3); }
+}
+
+.hud-metrics {
+  display: flex;
+  gap: 8px;
+}
+
+.metric-tag {
+  background: rgba(10, 16, 26, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-color);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+.metric-tag.highlight {
+  color: var(--primary-color);
+  font-weight: bold;
+}
+
+/* ---------------- Reticle (Central Crosshair) ---------------- */
+.reticle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 140px;
+  height: 140px;
+  pointer-events: none;
+  opacity: 0.6;
+  transition: opacity 0.3s, transform 0.3s;
+}
+
+.reticle-box {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  border: 1px dashed rgba(0, 255, 170, 0.3);
+  border-radius: 8px;
+}
+
+.corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--primary-color);
+  border-style: solid;
+}
+
+.corner.tl { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+.corner.tr { top: -1px; right: -1px; border-width: 2px 2px 0 0; }
+.corner.bl { bottom: -1px; left: -1px; border-width: 0 0 2px 2px; }
+.corner.br { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+.crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(0, 255, 170, 0.4);
+  transform: translate(-50%, -50%);
+}
+
+/* ---------------- Magnifier (PIP Card) ---------------- */
+.magnifier-card {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 140px;
+  background: rgba(10, 16, 26, 0.88);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  pointer-events: auto;
+  transition: opacity 0.3s, transform 0.3s;
+}
+
+.magnifier-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.mini-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#magnifierCanvas {
+  width: 124px;
+  height: 124px;
+  border-radius: 8px;
+  background: #000;
+  border: 1px solid rgba(0, 255, 170, 0.4);
+}
+
+.magnifier-caption {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--primary-color);
+  text-align: center;
+}
+
+/* ---------------- Alarm Banner ---------------- */
+.alarm-banner {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  background: rgba(255, 51, 102, 0.92);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 30px;
+  font-weight: bold;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 6px 20px var(--danger-glow);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  z-index: 10;
+}
+
+.alarm-banner.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---------------- Control Panel (Bottom) ---------------- */
+.control-panel {
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px);
+  border-top: 1px solid var(--border-color);
+  padding: 12px 14px calc(var(--safe-area-bottom) + 8px) 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 5;
+}
+
+/* Mode Selector Tabs */
+.mode-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.mode-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-tab.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--primary-color);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Quick Controls (Sensitivity & Zoom) */
+.quick-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.ctrl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ctrl-group label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.seg-btn-group {
+  display: flex;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.seg-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 2px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.seg-btn.active {
+  background: rgba(0, 255, 170, 0.2);
+  color: var(--primary-color);
+  font-weight: bold;
+}
+
+/* Action Buttons Grid */
+.action-buttons {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.action-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 8px 4px;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 0.2s;
+  height: 56px;
+}
+
+.action-btn .icon {
+  font-size: 18px;
+}
+
+.action-btn .txt {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.action-btn:active {
+  transform: scale(0.94);
+}
+
+.action-btn.active {
+  border-color: var(--primary-color);
+  background: rgba(0, 255, 170, 0.15);
+}
+
+.action-btn.active .txt {
+  color: var(--primary-color);
+}
+
+.action-btn.primary {
+  background: linear-gradient(135deg, #00d285 0%, #00b4d8 100%);
+  border: none;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+
+.action-btn.primary .icon,
+.action-btn.primary .txt {
+  color: #03141f;
+  font-weight: bold;
+}
+
+.action-btn.scanning {
+  background: linear-gradient(135deg, #ff3366 0%, #ff6b6b 100%);
+  box-shadow: 0 4px 14px var(--danger-glow);
+}
+
+/* ---------------- Welcome Modal ---------------- */
+.modal {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+  transition: opacity 0.3s;
+}
+
+.modal.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.modal-card {
+  background: #111827;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 20px;
+  padding: 24px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+}
+
+.modal-card h2 {
+  font-size: 20px;
+  margin-bottom: 12px;
+  color: var(--primary-color);
+}
+
+.modal-card p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.guide-list {
+  list-style: none;
+  font-size: 12px;
+  color: #cbd5e1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.guide-list li {
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.4;
+}
+
+.guide-list li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--primary-color);
+  font-size: 14px;
+}
+
+.primary-modal-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #00ffaa 0%, #00b4d8 100%);
+  color: #03141f;
+  font-weight: bold;
+  font-size: 15px;
+  padding: 14px;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px var(--primary-glow);
+  transition: transform 0.15s;
+}
+
+.primary-modal-btn:active {
+  transform: scale(0.97);
+}
+
+.sub-note {
+  margin-top: 12px;
+  font-size: 11px !important;
+  color: #64748b !important;
+  text-align: center;
+  margin-bottom: 0 !important;
+}

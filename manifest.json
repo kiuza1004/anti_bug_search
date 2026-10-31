@@ -1,0 +1,22 @@
+{
+  "name": "BugFinder AI - 벌레 탐지기",
+  "short_name": "벌레탐지기",
+  "description": "핸드폰 카메라로 모기와 벌레를 실시간 추적 및 감지하는 웹앱",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#080b10",
+  "theme_color": "#0d1117",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
