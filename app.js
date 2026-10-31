@@ -1,18 +1,21 @@
 /**
- * ARGON OPTICS // Ar-18 Tactical Bio-Scanner Engine v2.0
- * 온디바이스 실시간 모기·미세 곤충 광학 추적 및 스펙트럼 분석 엔진
+ * ARGON OPTICS // Ar-18 Tactical Bio-Scanner Engine v2.5 (Credibility & Precision Edition)
+ * - 3x3 공간 노이즈 블러 & 배경 엣지(가구/벽지 무늬) 흔들림 자동 배제
+ * - 다중 프레임 지속성 검증(Multi-Frame Temporal Tracker)으로 1프레임 가짜 오탐 원천 차단
+ * - 8방향 전방위 고립성(Omnidirectional Isolation) 검사로 선/모서리/그림자 오탐 제거
+ * - 저역통과 감쇠 필터(Low-pass Damping)로 초점 및 돋보기 이동의 떨림 완전 제거
  */
 
 class ArgonBugScanner {
   constructor() {
-    // 주요 DOM 참조
+    // 뷰포트 및 캔버스 DOM
     this.viewportStage = document.getElementById('viewportStage');
     this.video = document.getElementById('cameraVideo');
     this.overlayCanvas = document.getElementById('detectionCanvas');
     this.overlayCtx = this.overlayCanvas.getContext('2d');
     this.scanlineSweep = document.getElementById('scanlineSweep');
 
-    // 돋보기(Loupe) DOM
+    // 정밀 돋보기(Loupe) DOM
     this.magCard = document.getElementById('magnifierCard');
     this.magCanvas = document.getElementById('magnifierCanvas');
     this.magCtx = this.magCanvas.getContext('2d');
@@ -27,7 +30,7 @@ class ArgonBugScanner {
     this.statusBadge = document.getElementById('statusBadge');
     this.statusText = document.getElementById('statusText');
     this.stabBarFill = document.getElementById('stabBarFill');
-    this.fpsCounter = document.getElementById('fpsCounter');
+    this.fpsCounter = document.getElementById('fpsCounter'); // 노이즈/신뢰도 상태 표시 겸용
     this.targetCount = document.getElementById('targetCount');
     this.targetPill = document.getElementById('targetPill');
     this.alarmBanner = document.getElementById('alarmBanner');
@@ -36,15 +39,21 @@ class ArgonBugScanner {
     this.reticle = document.getElementById('reticle');
     this.reticleHint = document.getElementById('reticleHint');
 
-    // 오프스크린 컴퓨터 비전 분석 캔버스
-    this.procWidth = 320;
-    this.procHeight = 240;
+    // 오프스크린 비전 분석 해상도 (240x180으로 노이즈 억제 및 60fps 보장)
+    this.procWidth = 240;
+    this.procHeight = 180;
     this.procCanvas = document.createElement('canvas');
     this.procCanvas.width = this.procWidth;
     this.procCanvas.height = this.procHeight;
     this.procCtx = this.procCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 시뮬레이션 모드용 가상 소스 캔버스
+    // 고화질 돋보기 원본 추출용 캔버스
+    this.hiResCanvas = document.createElement('canvas');
+    this.hiResCanvas.width = 640;
+    this.hiResCanvas.height = 480;
+    this.hiResCtx = this.hiResCanvas.getContext('2d');
+
+    // 시뮬레이션 모드용 캔버스
     this.simCanvas = document.createElement('canvas');
     this.simCanvas.width = 640;
     this.simCanvas.height = 480;
@@ -57,31 +66,32 @@ class ArgonBugScanner {
     this.stream = null;
     this.currentFacingMode = 'environment';
     this.currentMode = 'flight'; // 'flight' | 'spot' | 'trail'
-    this.currentFilter = 'standard'; // 'standard' | 'argon' | 'night' | 'invert'
+    this.currentFilter = 'standard';
     this.sensitivity = 'mid'; // 'low' | 'mid' | 'high' | 'ultra'
     this.currentZoom = 1;
     this.loupeZoom = 4; // 4x or 8x
-    this.pinnedPoint = null; // { x: 0~1, y: 0~1 } 사용자 터치 지정 좌표
+    this.pinnedPoint = null; // 사용자 터치 고정 지점 { x, y }
+
+    // 돋보기(루페)의 현재 부드러운 포커스 좌표 (기본값: 화면 정중앙 0.5, 0.5)
+    this.loupeFocusX = 0.5;
+    this.loupeFocusY = 0.5;
 
     this.isTorchOn = false;
     this.soundEnabled = true;
     this.vibrateEnabled = true;
 
-    // 오디오 & 햅틱 상태
     this.audioCtx = null;
     this.lastAlarmTime = 0;
 
-    // 컴퓨터 비전 버퍼 & 추적 데이터
-    this.prevGrayBuffer = null;
-    this.bgFloatBuffer = null; // 지수이동평균(EMA) 배경 모델
-    this.recentTrails = [];    // 비행 궤적 포인트
-    this.heatmapPoints = [];   // 잔상 누적 히트맵 포인트
-    this.detectedTargets = [];
+    // 컴퓨터 비전 버퍼 & 다중 프레임 추적기(Tracker)
+    this.prevBlurGray = null;
+    this.bgFloatGray = null;
+    this.activeTracks = [];     // 다중 프레임 검증 트랙 목록
+    this.nextTrackId = 1;
+    this.heatmapPoints = [];    // 확정된 이동 궤적 히트맵
     this.stabilityScore = 100;
+    this.cameraHoldingSteadyFrames = 0; // 카메라가 흔들리지 않고 유지된 프레임 수
 
-    // FPS 측정
-    this.frameCount = 0;
-    this.lastFpsTime = performance.now();
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     this.initSimulationEntities();
@@ -90,26 +100,19 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // 시뮬레이션 데모용 가상 모기 엔티티 초기화
+  // 시뮬레이션 데모용 가상 엔티티 (데모 버튼 클릭 시에만 작동)
   // -------------------------------------------------------------
   initSimulationEntities() {
     this.simBugs = [
-      // 비행 모기 1 (빠른 불규칙 지그재그 비행)
-      { x: 0.35, y: 0.42, vx: 0.0045, vy: -0.0032, size: 3.2, flying: true, phase: 0 },
-      // 비행 날파리 2
-      { x: 0.68, y: 0.55, vx: -0.0038, vy: 0.0028, size: 2.5, flying: true, phase: 2.1 },
-      // 벽면에 붙어 있는 정지 모기 1 (중앙 부근)
-      { x: 0.52, y: 0.48, vx: 0, vy: 0, size: 3.8, flying: false, phase: 0 },
-      // 벽면에 붙어 있는 정지 벌레 2
-      { x: 0.44, y: 0.56, vx: 0, vy: 0, size: 3.0, flying: false, phase: 0 }
+      { x: 0.36, y: 0.44, vx: 0.0032, vy: -0.0022, size: 3.0, flying: true, phase: 0 },
+      { x: 0.50, y: 0.50, vx: 0, vy: 0, size: 3.5, flying: false, phase: 0 }
     ];
   }
 
   // -------------------------------------------------------------
-  // UI 이벤트 바인딩
+  // 이벤트 바인딩
   // -------------------------------------------------------------
   bindEvents() {
-    // 온보딩 모달: 실제 카메라 시작
     document.getElementById('initCamBtn').addEventListener('click', async () => {
       document.getElementById('startModal').classList.add('hidden');
       this.initAudioContext();
@@ -117,7 +120,6 @@ class ArgonBugScanner {
       this.toggleScanning(true);
     });
 
-    // 온보딩 모달: 시뮬레이션 데모 시작
     document.getElementById('simModeBtn').addEventListener('click', () => {
       document.getElementById('startModal').classList.add('hidden');
       this.initAudioContext();
@@ -125,20 +127,17 @@ class ArgonBugScanner {
       this.toggleScanning(true);
     });
 
-    // 메인 스캔 토글
     document.getElementById('startScanBtn').addEventListener('click', () => {
       this.initAudioContext();
       this.toggleScanning(!this.isScanning);
     });
 
-    // 3대 탐지 모드 전환
     document.querySelectorAll('.mode-card').forEach(btn => {
       btn.addEventListener('click', () => {
         this.switchMode(btn.dataset.mode);
       });
     });
 
-    // 4종 광학 비전 필터 전환
     document.querySelectorAll('.filter-chip').forEach(chip => {
       chip.addEventListener('click', () => {
         document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
@@ -147,16 +146,15 @@ class ArgonBugScanner {
       });
     });
 
-    // 민감도(Sensitivity) 세그먼트
     document.querySelectorAll('[data-sens]').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('[data-sens]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         this.sensitivity = btn.dataset.sens;
+        this.resetTrackingBuffers();
       });
     });
 
-    // 광학/디지털 줌 세그먼트
     document.querySelectorAll('[data-zoom]').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('[data-zoom]').forEach(b => b.classList.remove('active'));
@@ -165,40 +163,42 @@ class ArgonBugScanner {
       });
     });
 
-    // 뷰포트 터치/클릭 -> 해당 지점 정밀 루페 락온 (Tap-to-Inspect)
+    // 화면 터치 시 해당 위치로 돋보기 고정
     this.viewportStage.addEventListener('pointerdown', (e) => {
-      // UI 버튼 클릭은 제외
-      if (e.target.closest('button') || e.target.closest('aside') || e.target.closest('header') || e.target.closest('nav') || e.target.closest('.snapshot-toast')) {
+      if (
+        e.target.closest('button') ||
+        e.target.closest('aside') ||
+        e.target.closest('header') ||
+        e.target.closest('nav') ||
+        e.target.closest('.snapshot-toast')
+      ) {
         return;
       }
       const rect = this.viewportStage.getBoundingClientRect();
-      const nx = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
-      const ny = Math.max(0.05, Math.min(0.95, (e.clientY - rect.top) / rect.height));
+      const nx = Math.max(0.06, Math.min(0.94, (e.clientX - rect.left) / rect.width));
+      const ny = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
       this.setPinnedLoupePoint(nx, ny);
     });
 
-    // 루페 배율 전환 (4X <-> 8X)
     this.loupePowerBtn.addEventListener('click', () => {
       this.loupeZoom = this.loupeZoom === 4 ? 8 : 4;
       this.loupePowerBtn.textContent = `${this.loupeZoom}X`;
     });
 
-    // 루페 수동 락온 해제 (AUTO 복귀)
     this.resetPinBtn.addEventListener('click', () => {
       this.clearPinnedLoupePoint();
     });
 
-    // 루페 접기 / 열기
     document.getElementById('closeMagBtn').addEventListener('click', () => {
       this.magCard.classList.add('hidden');
       this.restoreMagBtn.classList.remove('hidden');
     });
+
     this.restoreMagBtn.addEventListener('click', () => {
       this.magCard.classList.remove('hidden');
       this.restoreMagBtn.classList.add('hidden');
     });
 
-    // 전술 독 액션 버튼들
     document.getElementById('torchBtn').addEventListener('click', () => this.toggleTorch());
 
     document.getElementById('soundBtn').addEventListener('click', () => {
@@ -222,30 +222,37 @@ class ArgonBugScanner {
     window.addEventListener('resize', () => this.handleResize());
   }
 
+  resetTrackingBuffers() {
+    this.activeTracks = [];
+    this.prevBlurGray = null;
+    this.bgFloatGray = null;
+  }
+
   // -------------------------------------------------------------
-  // 터치 지점 루페 고정 (Pinpoint Lock)
+  // 돋보기 터치 고정 / 중앙 조준 복귀
   // -------------------------------------------------------------
   setPinnedLoupePoint(nx, ny) {
     this.pinnedPoint = { x: nx, y: ny };
-    this.loupeModeBadge.textContent = 'LOCK';
+    this.loupeFocusX = nx;
+    this.loupeFocusY = ny;
+    this.loupeModeBadge.textContent = '수동고정';
     this.loupeModeBadge.classList.add('pinned');
     this.resetPinBtn.classList.remove('hidden');
     this.magCard.classList.remove('hidden');
     this.restoreMagBtn.classList.add('hidden');
-    this.reticleHint.textContent = '지점 고정됨 (우측 루페에서 AUTO 클릭 시 해제)';
-    this.updateMagnifier(nx * this.procWidth, ny * this.procHeight, 'PINPOINT LOCK');
+    this.reticleHint.textContent = '선택한 지점을 확대 중입니다 (우측 돋보기 [해제] 클릭 시 중앙 조준 복귀)';
   }
 
   clearPinnedLoupePoint() {
     this.pinnedPoint = null;
-    this.loupeModeBadge.textContent = 'AUTO';
+    this.loupeModeBadge.textContent = '중앙조준';
     this.loupeModeBadge.classList.remove('pinned');
     this.resetPinBtn.classList.add('hidden');
-    this.reticleHint.textContent = '화면을 터치하면 해당 지점을 정밀 확대합니다';
+    this.reticleHint.textContent = '카메라를 멈추고 조준하세요 (화면 터치 시 해당 위치 확대)';
   }
 
   // -------------------------------------------------------------
-  // Argon 소나 오디오 합성기 & 햅틱
+  // 오디오 & 진동 알림 (확정된 표적에만 작동)
   // -------------------------------------------------------------
   initAudioContext() {
     if (!this.audioCtx) {
@@ -259,51 +266,50 @@ class ArgonBugScanner {
     }
   }
 
-  playArgonSonarPing(confidence = 0.8) {
+  playArgonSonarPing(confidence = 0.85) {
     if (!this.soundEnabled || !this.audioCtx) return;
     try {
       const now = this.audioCtx.currentTime;
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
 
-      // 표적 신뢰도에 따라 주파수 피치 변조 (1100Hz ~ 1950Hz)
-      const baseFreq = 1100 + Math.min(1, confidence) * 650;
+      const baseFreq = 1050 + Math.min(1, confidence) * 450;
       osc.type = 'sine';
       osc.frequency.setValueAtTime(baseFreq, now);
-      osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.45, now + 0.09);
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.25, now + 0.08);
 
-      gain.gain.setValueAtTime(0.22, now);
-      gain.gain.exponentialRampToValueAtTime(0.008, now + 0.12);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.005, now + 0.11);
 
       osc.connect(gain);
       gain.connect(this.audioCtx.destination);
 
       osc.start(now);
-      osc.stop(now + 0.13);
-    } catch (e) {
-      // 오디오 컨텍스트 제한 시 무시
-    }
+      osc.stop(now + 0.12);
+    } catch (e) {}
   }
 
   triggerHaptic() {
     if (!this.vibrateEnabled || !navigator.vibrate) return;
     try {
-      navigator.vibrate([45, 30, 65]);
+      navigator.vibrate(50);
     } catch (e) {}
   }
 
   // -------------------------------------------------------------
-  // 카메라 스트림 & 시뮬레이션 데모 관리
+  // 카메라 스트림 초기화
   // -------------------------------------------------------------
   async startCamera() {
-    this.updateStatus('INITIALIZING OPTICS...', 'normal');
+    this.updateStatus('카메라 연결 중...', 'normal');
     this.isSimulation = false;
+    this.resetTrackingBuffers();
 
     if (this.stream) {
       this.stream.getTracks().forEach(t => t.stop());
     }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert('이 브라우저에서는 카메라 API를 사용할 수 없어 데모 모드로 전환합니다.');
       this.startSimulationMode();
       return;
     }
@@ -323,27 +329,28 @@ class ArgonBugScanner {
       await this.video.play();
 
       this.handleResize();
-      this.updateStatus('OPTICS ONLINE // SCANNING', 'active');
+      this.updateStatus('광학 스캔 중 (이상 없음)', 'active');
       this.applyHardwareZoom(this.currentZoom);
     } catch (err) {
-      console.warn('Camera fallback to simulation:', err);
+      console.warn('Camera access failed:', err);
+      alert('카메라 권한을 허용해 주셔야 실제 탐지가 가능합니다. 현재는 시뮬레이션 데모로 전환됩니다.');
       this.startSimulationMode();
     }
   }
 
   startSimulationMode() {
     this.isSimulation = true;
+    this.resetTrackingBuffers();
     if (this.stream) {
       this.stream.getTracks().forEach(t => t.stop());
       this.stream = null;
     }
     this.video.srcObject = null;
-    this.updateStatus('SIMULATION MODE // DEMO', 'active');
+    this.updateStatus('데모 시뮬레이션 실행 중', 'active');
   }
 
   switchCamera() {
     if (this.isSimulation) {
-      // 시뮬레이션 중이면 실제 카메라 재시도
       this.startCamera();
       return;
     }
@@ -353,7 +360,6 @@ class ArgonBugScanner {
 
   async toggleTorch() {
     if (!this.stream) {
-      // 시뮬레이션 또는 스트림 없을 때는 야간 증폭 필터로 자동 토글 보조
       const nextFilter = this.currentFilter === 'night' ? 'standard' : 'night';
       document.querySelectorAll('.filter-chip').forEach(c => {
         c.classList.toggle('active', c.dataset.filter === nextFilter);
@@ -370,12 +376,9 @@ class ArgonBugScanner {
       const caps = track.getCapabilities ? track.getCapabilities() : {};
       if (caps.torch) {
         this.isTorchOn = !this.isTorchOn;
-        await track.applyConstraints({
-          advanced: [{ torch: this.isTorchOn }]
-        });
+        await track.applyConstraints({ advanced: [{ torch: this.isTorchOn }] });
         document.getElementById('torchBtn').classList.toggle('active', this.isTorchOn);
       } else {
-        // 하드웨어 토치 미지원 기기는 야간 조도 증폭(Night Amplifier) 모드로 스마트 폴백
         this.isTorchOn = !this.isTorchOn;
         const targetFilter = this.isTorchOn ? 'night' : 'standard';
         document.querySelectorAll('.filter-chip').forEach(c => {
@@ -384,9 +387,7 @@ class ArgonBugScanner {
         this.setOpticalFilter(targetFilter);
         document.getElementById('torchBtn').classList.toggle('active', this.isTorchOn);
       }
-    } catch (e) {
-      console.warn('Torch fallback:', e);
-    }
+    } catch (e) {}
   }
 
   setOpticalFilter(filterName) {
@@ -398,6 +399,7 @@ class ArgonBugScanner {
     this.currentZoom = factor;
     this.applyHardwareZoom(factor);
     this.video.style.transform = `scale(${factor})`;
+    this.resetTrackingBuffers();
   }
 
   async applyHardwareZoom(factor) {
@@ -427,7 +429,7 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // 모드 & 스캔 상태 제어
+  // 모드 & 스캔 토글
   // -------------------------------------------------------------
   switchMode(mode) {
     this.currentMode = mode;
@@ -436,18 +438,20 @@ class ArgonBugScanner {
     });
 
     if (mode === 'flight') {
-      this.reticle.style.opacity = '0.42';
+      this.reticle.style.opacity = '0.45';
+      this.reticleHint.textContent = '카메라를 고정하고 허공이나 벽면을 비추면 날아가는 모기만 포착합니다';
     } else if (mode === 'spot') {
       this.reticle.style.opacity = '0.95';
       this.magCard.classList.remove('hidden');
       this.restoreMagBtn.classList.add('hidden');
+      this.reticleHint.textContent = '벽면의 의심스러운 검은 점을 중앙 원 안에 맞추고 잠시 멈추세요';
     } else if (mode === 'trail') {
-      this.reticle.style.opacity = '0.3';
+      this.reticle.style.opacity = '0.35';
+      this.reticleHint.textContent = '카메라를 고정해 두면 검증된 비행 궤적이 히트맵으로 누적됩니다';
     }
 
-    this.recentTrails = [];
+    this.resetTrackingBuffers();
     this.heatmapPoints = [];
-    this.detectedTargets = [];
   }
 
   toggleScanning(enable) {
@@ -461,14 +465,15 @@ class ArgonBugScanner {
       txt.textContent = 'STOP';
       svg.innerHTML = '<rect x="6" y="6" width="12" height="12" rx="2"/>';
       this.scanlineSweep.classList.add('scanning');
-      this.updateStatus(this.isSimulation ? 'SIMULATION // ACTIVE' : 'ARGON SCAN // ACTIVE', 'active');
+      this.resetTrackingBuffers();
+      this.updateStatus('광학 스캔 중 (이상 없음)', 'active');
       this.requestLoop();
     } else {
       btn.classList.remove('scanning');
       txt.textContent = 'SCAN';
       svg.innerHTML = '<polygon points="7 5 19 12 7 19 7 5"/>';
       this.scanlineSweep.classList.remove('scanning');
-      this.updateStatus('SCAN PAUSED', 'normal');
+      this.updateStatus('스캔 일시정지됨', 'normal');
       this.clearOverlay();
     }
   }
@@ -481,7 +486,7 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // 메인 비전 프레임 루프
+  // 메인 비전 루프
   // -------------------------------------------------------------
   requestLoop() {
     if (!this.isScanning) return;
@@ -495,251 +500,491 @@ class ArgonBugScanner {
     const h = this.simCanvas.height;
     const now = performance.now() * 0.001;
 
-    // 벽지 질감 그라데이션 배경 생성
     const grad = ctx.createRadialGradient(w * 0.5, h * 0.4, 30, w * 0.5, h * 0.5, w * 0.75);
     grad.addColorStop(0, '#cbd5e1');
-    grad.addColorStop(1, '#64748b');
+    grad.addColorStop(1, '#94a3b8');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, w, h);
 
-    // 미세한 벽지 격자 노이즈 패턴
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.04)';
-    for (let y = 0; y < h; y += 16) {
-      ctx.fillRect(0, y, w, 1);
-    }
-
-    // 가상 모기 업데이트 및 그리기
     for (const bug of this.simBugs) {
       if (bug.flying) {
-        // 불규칙 비행 가속도 변조
-        bug.vx += Math.sin(now * 6.5 + bug.phase) * 0.0005;
-        bug.vy += Math.cos(now * 5.2 + bug.phase) * 0.0005;
-        // 속도 제한
+        bug.vx += Math.sin(now * 4.5 + bug.phase) * 0.00035;
+        bug.vy += Math.cos(now * 3.8 + bug.phase) * 0.00035;
         const speed = Math.hypot(bug.vx, bug.vy);
-        if (speed > 0.008) {
-          bug.vx = (bug.vx / speed) * 0.008;
-          bug.vy = (bug.vy / speed) * 0.008;
+        if (speed > 0.0055) {
+          bug.vx = (bug.vx / speed) * 0.0055;
+          bug.vy = (bug.vy / speed) * 0.0055;
         }
         bug.x += bug.vx;
         bug.y += bug.vy;
 
-        if (bug.x < 0.12 || bug.x > 0.88) bug.vx *= -1;
-        if (bug.y < 0.15 || bug.y > 0.85) bug.vy *= -1;
+        if (bug.x < 0.18 || bug.x > 0.82) bug.vx *= -1;
+        if (bug.y < 0.20 || bug.y > 0.80) bug.vy *= -1;
       }
 
       const bx = bug.x * w;
       const by = bug.y * h;
 
-      // 모기 다리 및 날개 실루엣 렌더링 (루페 확대 시 실제 모기처럼 보이도록 정교하게 표현)
       ctx.save();
       ctx.translate(bx, by);
-      ctx.rotate(bug.flying ? Math.atan2(bug.vy, bug.vx) : 0.4);
+      ctx.rotate(bug.flying ? Math.atan2(bug.vy, bug.vx) : 0.3);
 
-      // 다리 6개
       ctx.strokeStyle = '#1e293b';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(-4, -3); ctx.lineTo(4, 3);
       ctx.moveTo(-4, 3);  ctx.lineTo(4, -3);
-      ctx.moveTo(0, -4.5); ctx.lineTo(0, 4.5);
       ctx.stroke();
 
-      // 몸통
       ctx.fillStyle = '#0f172a';
       ctx.beginPath();
-      ctx.ellipse(0, 0, bug.size * 1.2, bug.size * 0.65, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, bug.size * 1.15, bug.size * 0.65, 0, 0, Math.PI * 2);
       ctx.fill();
-
       ctx.restore();
     }
   }
 
   processFrame() {
-    // FPS 업데이트
-    this.frameCount++;
-    const now = performance.now();
-    if (now - this.lastFpsTime >= 500) {
-      const fps = Math.min(60, Math.round((this.frameCount * 1000) / (now - this.lastFpsTime)));
-      this.fpsCounter.textContent = fps;
-      this.frameCount = 0;
-      this.lastFpsTime = now;
-    }
-
     if (this.isSimulation) {
       this.renderSimulationFrame();
       this.procCtx.drawImage(this.simCanvas, 0, 0, this.procWidth, this.procHeight);
+      this.hiResCtx.drawImage(this.simCanvas, 0, 0, this.hiResCanvas.width, this.hiResCanvas.height);
     } else {
       if (this.video.readyState < 2) return;
       this.procCtx.drawImage(this.video, 0, 0, this.procWidth, this.procHeight);
+      this.hiResCtx.drawImage(this.video, 0, 0, this.hiResCanvas.width, this.hiResCanvas.height);
     }
 
     const frameData = this.procCtx.getImageData(0, 0, this.procWidth, this.procHeight);
 
-    if (this.currentMode === 'flight') {
-      this.analyzeFlightAndTrail(frameData, false);
-    } else if (this.currentMode === 'trail') {
-      this.analyzeFlightAndTrail(frameData, true);
+    // 1단계: 3x3 공간 평균 블러(카메라 센서 픽셀 노이즈 제거) 및 배경 엣지 강도 계산
+    const { blurGray, edgeMag } = this.computeSmoothedGrayAndEdge(frameData.data, this.procWidth, this.procHeight);
+
+    // 2단계: 전역 카메라 흔들림 및 노이즈 레벨 측정
+    const { isCameraSteady, noiseFloor } = this.measureCameraStability(blurGray, edgeMag);
+
+    // 3단계: 모드별 후보 검출 및 다중 프레임 지속성 추적기 업데이트
+    if (this.currentMode === 'flight' || this.currentMode === 'trail') {
+      this.detectAndTrackKinetic(blurGray, edgeMag, isCameraSteady, noiseFloor);
     } else {
-      this.analyzeStaticMicroSpots(frameData);
+      this.detectAndTrackMicroSpot(blurGray, edgeMag, isCameraSteady);
     }
 
-    // 수동 고정 루페가 활성화되어 있으면 매 프레임 해당 지점 실시간 갱신
-    if (this.pinnedPoint) {
-      this.updateMagnifier(
-        this.pinnedPoint.x * this.procWidth,
-        this.pinnedPoint.y * this.procHeight,
-        'PINPOINT LOCK'
-      );
-    }
+    // 4단계: 정밀 돋보기(루페) 포커스 부드럽게 갱신
+    this.updateSmoothLoupe();
 
+    // 5단계: HUD 및 검증 상태 렌더링
+    this.evaluateTacticalAlarm(isCameraSteady);
     this.renderArgonHUD();
   }
 
   // -------------------------------------------------------------
-  // 알고리즘 1 & 3: 비행 레이더 (KINETIC) & 잔상 누적 히트맵 (TRAIL)
+  // [핵심 1] 3x3 공간 노이즈 블러 & 배경 엣지(가구/벽지 선) 추출
   // -------------------------------------------------------------
-  analyzeFlightAndTrail(currentFrame, accumulateHeatmap = false) {
-    const rgba = currentFrame.data;
+  computeSmoothedGrayAndEdge(rgba, w, h) {
+    const rawGray = new Uint8Array(w * h);
+    for (let i = 0, j = 0; i < rgba.length; i += 4, j++) {
+      rawGray[j] = (rgba[i] * 77 + rgba[i + 1] * 150 + rgba[i + 2] * 29) >> 8;
+    }
+
+    const blurGray = new Uint8Array(w * h);
+    const edgeMag = new Uint8Array(w * h);
+
+    for (let y = 1; y < h - 1; y++) {
+      const row = y * w;
+      for (let x = 1; x < w - 1; x++) {
+        const idx = row + x;
+        // 3x3 십자+중심 가중 평균으로 단일 픽셀 ISO 그레인 노이즈 억제
+        const c = rawGray[idx];
+        const l = rawGray[idx - 1];
+        const r = rawGray[idx + 1];
+        const u = rawGray[idx - w];
+        const d = rawGray[idx + w];
+
+        blurGray[idx] = (c * 4 + l + r + u + d) >> 3;
+
+        // 공간 기울기(Edge Magnitude): 가구 모서리나 벽지 선처럼 원래 경계가 뚜렷한 곳 파악
+        const gx = Math.abs(r - l);
+        const gy = Math.abs(d - u);
+        edgeMag[idx] = Math.min(255, gx + gy);
+      }
+    }
+
+    return { blurGray, edgeMag };
+  }
+
+  // -------------------------------------------------------------
+  // [핵심 2] 카메라 흔들림 안정도 & 센서 노이즈 바닥값 측정
+  // -------------------------------------------------------------
+  measureCameraStability(blurGray, edgeMag) {
     const w = this.procWidth;
     const h = this.procHeight;
-    const totalPixels = w * h;
 
-    const curGray = new Uint8Array(totalPixels);
-    for (let i = 0, j = 0; i < rgba.length; i += 4, j++) {
-      curGray[j] = (rgba[i] * 77 + rgba[i + 1] * 150 + rgba[i + 2] * 29) >> 8;
+    if (!this.prevBlurGray || !this.bgFloatGray) {
+      this.prevBlurGray = new Uint8Array(blurGray);
+      this.bgFloatGray = new Float32Array(blurGray);
+      return { isCameraSteady: false, noiseFloor: 5 };
     }
 
-    if (!this.prevGrayBuffer || !this.bgFloatBuffer) {
-      this.prevGrayBuffer = curGray;
-      this.bgFloatBuffer = new Float32Array(curGray);
-      return;
-    }
+    let diffSum = 0;
+    let largeShiftCount = 0;
+    let sampleCount = 0;
 
-    // 감도 파라미터 매핑 (4단계)
-    const sensMap = {
-      low:   { thresh: 34, minBox: 2, maxBox: 22 },
-      mid:   { thresh: 25, minBox: 2, maxBox: 28 },
-      high:  { thresh: 18, minBox: 1, maxBox: 32 },
-      ultra: { thresh: 12, minBox: 1, maxBox: 36 }
-    };
-    const cfg = sensMap[this.sensitivity] || sensMap.mid;
-
-    const step = 2;
-    const diffPoints = [];
-    let activeMotionPixels = 0;
-
-    for (let y = 2; y < h - 2; y += step) {
-      for (let x = 2; x < w - 2; x += step) {
+    for (let y = 8; y < h - 8; y += 4) {
+      for (let x = 8; x < w - 8; x += 4) {
         const idx = y * w + x;
-        const g = curGray[idx];
-        const prevG = this.prevGrayBuffer[idx];
-        const bgG = this.bgFloatBuffer[idx];
-
-        // 인접 프레임 차분과 EMA 배경 차분 결합
-        const frameDiff = Math.abs(g - prevG);
-        const bgDiff = Math.abs(g - bgG);
-        const combinedDiff = Math.max(frameDiff, bgDiff * 0.85);
-
-        // 배경 버퍼 서서히 업데이트
-        this.bgFloatBuffer[idx] = bgG * 0.88 + g * 0.12;
-
-        if (combinedDiff > cfg.thresh) {
-          activeMotionPixels++;
-          diffPoints.push({ x, y, strength: combinedDiff });
-        }
+        const diff = Math.abs(blurGray[idx] - this.prevBlurGray[idx]);
+        diffSum += diff;
+        if (diff > 14) largeShiftCount++;
+        sampleCount++;
       }
     }
 
-    const sampledTotal = ((w - 4) / step) * ((h - 4) / step);
-    const motionRatio = activeMotionPixels / sampledTotal;
+    const avgDiff = diffSum / sampleCount;
+    const shiftRatio = largeShiftCount / sampleCount;
 
-    // 카메라 손떨림 안정도 점수 산출 (0 ~ 100%)
-    this.stabilityScore = Math.max(0, Math.min(100, Math.round((1 - motionRatio * 6.5) * 100)));
+    // 화면 전체의 6% 이상이 동시에 움직이면 사용자가 스마트폰을 움직이는 중으로 판단
+    const rawStability = Math.max(0, Math.min(100, Math.round((1 - shiftRatio * 10) * 100)));
+    this.stabilityScore = Math.round(this.stabilityScore * 0.65 + rawStability * 0.35);
     this.updateStabilityMeter(this.stabilityScore);
 
-    const prevTargets = [...this.detectedTargets];
-    this.detectedTargets = [];
-    const now = performance.now();
-
-    // 전역 흔들림이 13% 미만일 때만 미세 비행 곤충으로 인정 (손떨림 오탐 원천 차단)
-    if (motionRatio < 0.13 && diffPoints.length > 0) {
-      const clusters = this.clusterPoints(diffPoints, 16);
-
-      for (const cl of clusters) {
-        const bw = cl.maxX - cl.minX + step;
-        const bh = cl.maxY - cl.minY + step;
-
-        if (bw >= cfg.minBox && bw <= cfg.maxBox && bh >= cfg.minBox && bh <= cfg.maxBox) {
-          const cx = ((cl.minX + cl.maxX) * 0.5) / w;
-          const cy = ((cl.minY + cl.maxY) * 0.5) / h;
-
-          // 이전 프레임 표적과 매칭하여 속도 벡터(vx, vy) 계산
-          let vx = 0;
-          let vy = 0;
-          let bestDist = 0.12;
-          for (const pt of prevTargets) {
-            const d = Math.hypot(cx - pt.x, cy - pt.y);
-            if (d < bestDist && d > 0.001) {
-              bestDist = d;
-              vx = cx - pt.x;
-              vy = cy - pt.y;
-            }
-          }
-
-          const conf = Math.min(0.99, 0.55 + (cl.points.length / 18) * 0.44);
-
-          this.detectedTargets.push({
-            x: cx,
-            y: cy,
-            w: bw / w,
-            h: bh / h,
-            vx,
-            vy,
-            type: 'kinetic',
-            confidence: conf
-          });
-
-          this.recentTrails.push({ x: cx, y: cy, timestamp: now });
-
-          if (accumulateHeatmap) {
-            this.heatmapPoints.push({
-              x: cx,
-              y: cy,
-              intensity: Math.min(1, cl.points.length / 10),
-              timestamp: now
-            });
-          }
-        }
-      }
+    // 노이즈 상태 표시 업데이트
+    if (avgDiff < 2.5) {
+      this.fpsCounter.textContent = '극저';
+      this.fpsCounter.style.color = '#00ff9d';
+    } else if (avgDiff < 5.5) {
+      this.fpsCounter.textContent = '안정';
+      this.fpsCounter.style.color = '#f8fafc';
+    } else {
+      this.fpsCounter.textContent = '흔들림';
+      this.fpsCounter.style.color = '#ffb800';
     }
 
-    // 포착된 비행 표적이 있고 수동 루페 고정 상태가 아니면 1순위 표적을 루페로 자동 추적
-    if (this.detectedTargets.length > 0 && !this.pinnedPoint) {
-      const primary = this.detectedTargets[0];
-      this.updateMagnifier(
-        primary.x * w,
-        primary.y * h,
-        `KINETIC ${Math.round(primary.confidence * 100)}%`
-      );
+    const isSteadyNow = this.stabilityScore >= 72 && avgDiff < 6.0;
+    if (isSteadyNow) {
+      this.cameraHoldingSteadyFrames = Math.min(60, this.cameraHoldingSteadyFrames + 1);
+    } else {
+      this.cameraHoldingSteadyFrames = 0;
+      // 카메라가 크게 흔들리면 미확정 후보 트랙들을 즉시 초기화해 가짜 박스 방지
+      this.activeTracks = this.activeTracks.filter(t => t.confirmed);
     }
 
-    // 궤적 및 히트맵 수명 관리
-    this.recentTrails = this.recentTrails.filter(t => now - t.timestamp < 2000);
-    this.heatmapPoints = this.heatmapPoints.filter(hPt => now - hPt.timestamp < 8000);
-
-    this.prevGrayBuffer = curGray;
-    this.evaluateTacticalAlarm();
+    return {
+      isCameraSteady: this.cameraHoldingSteadyFrames >= 5,
+      noiseFloor: avgDiff
+    };
   }
 
   updateStabilityMeter(score) {
     this.stabBarFill.style.width = `${score}%`;
-    if (score >= 70) {
+    if (score >= 75) {
       this.stabBarFill.style.backgroundColor = '#00ff9d';
-    } else if (score >= 40) {
+    } else if (score >= 45) {
       this.stabBarFill.style.backgroundColor = '#ffb800';
     } else {
       this.stabBarFill.style.backgroundColor = '#ff2a6d';
     }
+  }
+
+  // -------------------------------------------------------------
+  // [핵심 3] 비행 레이더 (KINETIC): 배경 엣지 배제 + 다중 프레임 궤적 검증
+  // -------------------------------------------------------------
+  detectAndTrackKinetic(blurGray, edgeMag, isCameraSteady, noiseFloor) {
+    const w = this.procWidth;
+    const h = this.procHeight;
+
+    // 민감도별 기준 임계값 (노이즈 바닥값에 자동 적응)
+    const sensConfig = {
+      low:   { baseThresh: 28, confirmFrames: 10, minMoveDist: 0.04 },
+      mid:   { baseThresh: 21, confirmFrames: 8,  minMoveDist: 0.03 },
+      high:  { baseThresh: 16, confirmFrames: 6,  minMoveDist: 0.022 },
+      ultra: { baseThresh: 12, confirmFrames: 5,  minMoveDist: 0.015 }
+    };
+    const cfg = sensConfig[this.sensitivity] || sensConfig.mid;
+    const adaptiveThresh = Math.max(cfg.baseThresh, noiseFloor * 4.2);
+
+    const candidates = [];
+
+    if (isCameraSteady) {
+      const motionPixels = [];
+      const step = 2;
+
+      for (let y = 6; y < h - 6; y += step) {
+        for (let x = 6; x < w - 6; x += step) {
+          const idx = y * w + x;
+          const cur = blurGray[idx];
+          const prev = this.prevBlurGray[idx];
+          const bg = this.bgFloatGray[idx];
+
+          // 배경 EMA 업데이트
+          this.bgFloatGray[idx] = bg * 0.9 + cur * 0.1;
+
+          const frameDiff = Math.abs(cur - prev);
+          const bgDiff = Math.abs(cur - bg);
+
+          // [결정적 필터] 가구 모서리/벽지 선 등 원래 배경 엣지(edgeMag)가 강한 곳은
+          // 미세한 손떨림에도 diff가 크게 나오므로 edgeMag 비례 페널티를 부여해 완벽 배제!
+          const edgePenalty = edgeMag[idx] * 0.65;
+          const pureMotion = Math.min(frameDiff, bgDiff) - edgePenalty;
+
+          if (pureMotion > adaptiveThresh) {
+            motionPixels.push({ x, y, score: pureMotion });
+          }
+        }
+      }
+
+      // 변화 픽셀이 너무 많으면(조명 깜빡임 등) 무시하고, 적정 개수일 때만 군집화
+      if (motionPixels.length >= 1 && motionPixels.length <= 85) {
+        const clusters = this.clusterPoints(motionPixels, 10);
+
+        for (const cl of clusters) {
+          const bw = cl.maxX - cl.minX + step;
+          const bh = cl.maxY - cl.minY + step;
+          const aspect = bw / Math.max(1, bh);
+
+          // 모기/날파리 크기(2~18px) 및 찌그러지지 않은 비율(0.35~2.8)만 통과 (길쭉한 선 배제)
+          if (bw >= 2 && bw <= 18 && bh >= 2 && bh <= 18 && aspect >= 0.35 && aspect <= 2.8) {
+            candidates.push({
+              x: ((cl.minX + cl.maxX) * 0.5) / w,
+              y: ((cl.minY + cl.maxY) * 0.5) / h,
+              w: bw / w,
+              h: bh / h,
+              type: 'kinetic'
+            });
+          }
+        }
+      }
+    } else {
+      // 카메라 이동 중일 때는 배경 모델만 빠르게 재적응
+      for (let i = 0; i < blurGray.length; i++) {
+        this.bgFloatGray[i] = blurGray[i];
+      }
+    }
+
+    this.prevBlurGray.set(blurGray);
+    this.updateMultiFrameTracks(candidates, cfg.confirmFrames, cfg.minMoveDist, 'kinetic');
+  }
+
+  // -------------------------------------------------------------
+  // [핵심 4] 벽면 점 스캔 (MICRO-SPOT): 8방향 전방위 고립성 검사
+  // -------------------------------------------------------------
+  detectAndTrackMicroSpot(blurGray, edgeMag, isCameraSteady) {
+    const w = this.procWidth;
+    const h = this.procHeight;
+
+    const sensConfig = {
+      low:   { contrast: 36, confirmFrames: 12 },
+      mid:   { contrast: 26, confirmFrames: 10 },
+      high:  { contrast: 19, confirmFrames: 8 },
+      ultra: { contrast: 14, confirmFrames: 6 }
+    };
+    const cfg = sensConfig[this.sensitivity] || sensConfig.mid;
+
+    const candidates = [];
+
+    if (isCameraSteady) {
+      // 중앙 레티클 영역 내부(중앙 44% 영역)를 정밀 탐색
+      const startX = Math.floor(w * 0.28);
+      const endX = Math.floor(w * 0.72);
+      const startY = Math.floor(h * 0.28);
+      const endY = Math.floor(h * 0.72);
+
+      const rInner = 5;  // 내부 배경 링 반경
+      const rOuter = 10; // 외부 배경 링 반경 (큰 그림자 배제용)
+      const dirs = [
+        [-1, 0], [1, 0], [0, -1], [0, 1],
+        [-1, -1], [1, -1], [-1, 1], [1, 1]
+      ];
+
+      const rawSpots = [];
+
+      for (let y = startY; y < endY; y += 2) {
+        for (let x = startX; x < endX; x += 2) {
+          const cLum = blurGray[y * w + x];
+
+          // 1) 8방향 모두(상하좌우+대각선) 중심점보다 뚜렷하게 밝은지 검사!
+          // 만약 한 방향이라도 어두우면 그건 '점(모기)'이 아니라 '선(벽지 무늬/모서리)'이므로 즉시 탈락!
+          let allBrighter = true;
+          let ringSum = 0;
+          let ringMin = 255;
+          let ringMax = 0;
+
+          for (let d = 0; d < 8; d++) {
+            const nx = x + dirs[d][0] * rInner;
+            const ny = y + dirs[d][1] * rInner;
+            const nLum = blurGray[ny * w + nx];
+
+            // 모든 방향이 최소 contrast * 0.65 이상은 중심보다 밝아야 함
+            if (nLum - cLum < cfg.contrast * 0.65) {
+              allBrighter = false;
+              break;
+            }
+            ringSum += nLum;
+            if (nLum < ringMin) ringMin = nLum;
+            if (nLum > ringMax) ringMax = nLum;
+          }
+
+          if (!allBrighter) continue;
+
+          // 2) 주변 벽면 배경의 균일성 검사: 배경 8방향끼리의 밝기 차이가 크면(복잡한 무늬 경계) 탈락!
+          const bgSpread = ringMax - ringMin;
+          const avgRing = ringSum / 8;
+          const delta = avgRing - cLum;
+
+          if (delta < cfg.contrast || bgSpread > delta * 1.1) continue;
+
+          // 3) 더 바깥쪽(rOuter=10px) 4방향도 밝은지 확인 (큰 검은 물체 모서리 배제)
+          const out1 = blurGray[y * w + (x - rOuter)];
+          const out2 = blurGray[y * w + (x + rOuter)];
+          const out3 = blurGray[(y - rOuter) * w + x];
+          const out4 = blurGray[(y + rOuter) * w + x];
+          if (out1 - cLum < cfg.contrast * 0.5 || out2 - cLum < cfg.contrast * 0.5 ||
+              out3 - cLum < cfg.contrast * 0.5 || out4 - cLum < cfg.contrast * 0.5) {
+            continue;
+          }
+
+          // 화면 정중앙(0.5, 0.5)에 가까울수록 가점 부여
+          const distFromCenter = Math.hypot(x / w - 0.5, y / h - 0.5);
+          const priorityScore = delta * (1.2 - distFromCenter);
+
+          rawSpots.push({ x, y, delta, priorityScore });
+        }
+      }
+
+      // 가장 확실한 점 최대 2개만 비최대 억제(NMS)로 추출
+      rawSpots.sort((a, b) => b.priorityScore - a.priorityScore);
+      const picked = [];
+      for (const s of rawSpots) {
+        if (!picked.some(p => Math.hypot(p.x - s.x, p.y - s.y) < 18)) {
+          picked.push(s);
+          if (picked.length >= 2) break;
+        }
+      }
+
+      for (const p of picked) {
+        candidates.push({
+          x: p.x / w,
+          y: p.y / h,
+          w: 0.04,
+          h: 0.04,
+          contrast: Math.round(p.delta),
+          type: 'spot'
+        });
+      }
+    }
+
+    this.prevBlurGray.set(blurGray);
+    this.updateMultiFrameTracks(candidates, cfg.confirmFrames, 0, 'spot');
+  }
+
+  // -------------------------------------------------------------
+  // [핵심 5] 다중 프레임 지속성 추적기 & 저역통과 초점 스무딩
+  // -------------------------------------------------------------
+  updateMultiFrameTracks(candidates, confirmFrames, minMoveDist, modeType) {
+    const now = performance.now();
+    const matchRadius = modeType === 'spot' ? 0.055 : 0.11;
+    const matchedCandIndices = new Set();
+
+    // 1) 기존 트랙과 현재 후보 매칭
+    for (const track of this.activeTracks) {
+      let bestIdx = -1;
+      let bestDist = matchRadius;
+
+      for (let i = 0; i < candidates.length; i++) {
+        if (matchedCandIndices.has(i)) continue;
+        const c = candidates[i];
+        const d = Math.hypot(c.x - track.rawX, c.y - track.rawY);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx !== -1) {
+        matchedCandIndices.add(bestIdx);
+        const c = candidates[bestIdx];
+
+        // 속도 벡터 저역통과 스무딩
+        const instVx = c.x - track.rawX;
+        const instVy = c.y - track.rawY;
+        track.vx = track.vx * 0.7 + instVx * 0.3;
+        track.vy = track.vy * 0.7 + instVy * 0.3;
+
+        track.rawX = c.x;
+        track.rawY = c.y;
+
+        // 화면 표시 좌표는 강한 감쇠 보간(Smooth Damping)을 적용해 초점이 절대 떨리지 않게 함
+        const smoothFactor = modeType === 'spot' ? 0.16 : 0.28;
+        track.x = track.x * (1 - smoothFactor) + c.x * smoothFactor;
+        track.y = track.y * (1 - smoothFactor) + c.y * smoothFactor;
+
+        if (c.contrast) track.contrast = c.contrast;
+
+        track.hitCount = Math.min(confirmFrames + 15, track.hitCount + 1);
+        track.missCount = 0;
+        track.trail.push({ x: track.x, y: track.y, timestamp: now });
+
+        // 최초 발견 지점으로부터의 이동 거리 계산 (비행 모기는 실제로 이동해야 확정)
+        const totalDisp = Math.hypot(track.x - track.originX, track.y - track.originY);
+        const passedMoveCheck = modeType === 'spot' || totalDisp >= minMoveDist;
+
+        track.verificationProgress = Math.min(1, track.hitCount / confirmFrames);
+
+        if (track.hitCount >= confirmFrames && passedMoveCheck) {
+          track.confirmed = true;
+          if (this.currentMode === 'trail') {
+            this.heatmapPoints.push({
+              x: track.x,
+              y: track.y,
+              intensity: 0.8,
+              timestamp: now
+            });
+          }
+        }
+      } else {
+        track.missCount++;
+        track.hitCount = Math.max(0, track.hitCount - 1);
+      }
+
+      // 궤적 수명 관리 (최근 1.6초)
+      track.trail = track.trail.filter(pt => now - pt.timestamp < 1600);
+    }
+
+    // 2) 매칭되지 않은 새 후보를 신규 예비 트랙으로 등록 (최대 트랙 수 제한)
+    for (let i = 0; i < candidates.length; i++) {
+      if (!matchedCandIndices.has(i) && this.activeTracks.length < 6) {
+        const c = candidates[i];
+        this.activeTracks.push({
+          id: this.nextTrackId++,
+          originX: c.x,
+          originY: c.y,
+          rawX: c.x,
+          rawY: c.y,
+          x: c.x,
+          y: c.y,
+          w: c.w,
+          h: c.h,
+          vx: 0,
+          vy: 0,
+          type: c.type,
+          contrast: c.contrast || 0,
+          hitCount: 1,
+          missCount: 0,
+          verificationProgress: 1 / confirmFrames,
+          confirmed: false,
+          trail: [{ x: c.x, y: c.y, timestamp: now }]
+        });
+      }
+    }
+
+    // 3) 소멸된 트랙 정리 (확정된 트랙은 잠시 가려져도 8프레임간 유예하여 깜빡임 방지)
+    this.activeTracks = this.activeTracks.filter(t => {
+      const maxMiss = t.confirmed ? 8 : 3;
+      return t.missCount <= maxMiss && t.hitCount > 0;
+    });
+
+    // 히트맵 수명 관리
+    this.heatmapPoints = this.heatmapPoints.filter(hPt => now - hPt.timestamp < 8000);
   }
 
   clusterPoints(points, radius) {
@@ -782,174 +1027,125 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // 알고리즘 2: 벽면 정지 미세 암점 탐지 (MICRO-SPOT)
+  // [핵심 6] 정밀 돋보기(루페) 부드러운 포커스 제어
   // -------------------------------------------------------------
-  analyzeStaticMicroSpots(currentFrame) {
-    const rgba = currentFrame.data;
-    const w = this.procWidth;
-    const h = this.procHeight;
+  updateSmoothLoupe() {
+    let targetX = 0.5;
+    let targetY = 0.5;
+    let label = '중앙 십자선 확대 중';
+    let badgeText = '중앙조준';
 
-    // 중앙 레티클 관심 영역 (ROI: 중앙 56% 영역 집중 스캔)
-    const startX = Math.floor(w * 0.22);
-    const endX = Math.floor(w * 0.78);
-    const startY = Math.floor(h * 0.22);
-    const endY = Math.floor(h * 0.78);
+    const confirmedTracks = this.activeTracks.filter(t => t.confirmed);
 
-    const threshMap = { low: 46, mid: 33, high: 23, ultra: 15 };
-    const contrastThresh = threshMap[this.sensitivity] || 33;
-
-    const candidates = [];
-    const step = 3;
-    const ringRadius = 6;
-
-    for (let y = startY; y < endY; y += step) {
-      for (let x = startX; x < endX; x += step) {
-        const idx = (y * w + x) * 4;
-        const centerLum = (rgba[idx] * 77 + rgba[idx + 1] * 150 + rgba[idx + 2] * 29) >> 8;
-
-        // 주변 8방향 링 샘플링으로 고립된 작은 어두운 점(모기)인지 판별
-        const offsets = [
-          [-ringRadius, 0], [ringRadius, 0], [0, -ringRadius], [0, ringRadius],
-          [-ringRadius, -ringRadius], [ringRadius, -ringRadius],
-          [-ringRadius, ringRadius], [ringRadius, ringRadius]
-        ];
-
-        let surroundSum = 0;
-        let minSurround = 255;
-        for (let k = 0; k < offsets.length; k++) {
-          const nx = x + offsets[k][0];
-          const ny = y + offsets[k][1];
-          const nIdx = (ny * w + nx) * 4;
-          const nLum = (rgba[nIdx] * 77 + rgba[nIdx + 1] * 150 + rgba[nIdx + 2] * 29) >> 8;
-          surroundSum += nLum;
-          if (nLum < minSurround) minSurround = nLum;
-        }
-
-        const avgSurround = surroundSum / 8;
-        const delta = avgSurround - centerLum;
-
-        // 중심점이 주변 평균보다 뚜렷하게 어둡고, 긴 선(벽지 모서리)이 아닌 점 형태일 때
-        if (delta > contrastThresh && (minSurround - centerLum) > contrastThresh * 0.45) {
-          candidates.push({ x, y, delta });
-        }
-      }
+    if (this.pinnedPoint) {
+      // 1순위: 사용자가 직접 터치해 고정한 지점
+      targetX = this.pinnedPoint.x;
+      targetY = this.pinnedPoint.y;
+      label = '터치 지점 정밀 확대';
+      badgeText = '수동고정';
+    } else if (confirmedTracks.length > 0) {
+      // 2순위: 다중 프레임 검증이 100% 완료된 확정 표적만 부드럽게 추적
+      const primary = confirmedTracks[0];
+      targetX = primary.x;
+      targetY = primary.y;
+      label = primary.type === 'spot' ? `확정 암점 (Δ+${primary.contrast})` : '확정 비행 표적 추적';
+      badgeText = '표적락온';
     }
 
-    // 대비율(Delta) 순으로 내림차순 정렬 후 인접 중복 제거 (Non-Maximum Suppression)
-    candidates.sort((a, b) => b.delta - a.delta);
-    const selected = [];
-    for (const c of candidates) {
-      const tooClose = selected.some(s => Math.hypot(s.x - c.x, s.y - c.y) < 18);
-      if (!tooClose) {
-        selected.push(c);
-        if (selected.length >= 3) break; // 상위 3개 표적 락온
-      }
+    // 무거운 감속 보간(0.86 : 0.14)으로 돋보기 화면이 절대 덜덜 떨리거나 급발진하지 않음
+    this.loupeFocusX = this.loupeFocusX * 0.86 + targetX * 0.14;
+    this.loupeFocusY = this.loupeFocusY * 0.86 + targetY * 0.14;
+
+    if (!this.pinnedPoint) {
+      this.loupeModeBadge.textContent = badgeText;
     }
 
-    this.detectedTargets = selected.map((s, idx) => ({
-      x: s.x / w,
-      y: s.y / h,
-      w: 0.045,
-      h: 0.045,
-      type: 'spot',
-      rank: idx + 1,
-      contrast: Math.round(s.delta),
-      confidence: Math.min(0.99, s.delta / 80)
-    }));
-
-    this.updateStabilityMeter(96);
-
-    if (this.detectedTargets.length > 0 && !this.pinnedPoint) {
-      const best = selected[0];
-      this.updateMagnifier(best.x, best.y, `Δ CONTRAST +${Math.round(best.delta)}`);
-    }
-
-    this.evaluateTacticalAlarm();
+    this.renderMagnifierCanvas(this.loupeFocusX, this.loupeFocusY, label);
   }
 
-  // -------------------------------------------------------------
-  // 정밀 광학 루페(Magnifier) 렌더링 (4x / 8x 지원)
-  // -------------------------------------------------------------
-  updateMagnifier(procX, procY, captionText) {
+  renderMagnifierCanvas(normX, normY, captionText) {
     if (!this.magCanvas) return;
     const mw = this.magCanvas.width;
     const mh = this.magCanvas.height;
+    const srcW = this.hiResCanvas.width;
+    const srcH = this.hiResCanvas.height;
 
-    // 4X일 때는 36px 영역, 8X일 때는 18px 영역 크롭
-    const cropSize = this.loupeZoom === 8 ? 18 : 36;
-    const sx = Math.max(0, Math.min(this.procWidth - cropSize, procX - cropSize * 0.5));
-    const sy = Math.max(0, Math.min(this.procHeight - cropSize, procY - cropSize * 0.5));
+    const cropW = this.loupeZoom === 8 ? 44 : 88;
+    const cropH = this.loupeZoom === 8 ? 44 : 88;
+
+    const sx = Math.max(0, Math.min(srcW - cropW, normX * srcW - cropW * 0.5));
+    const sy = Math.max(0, Math.min(srcH - cropH, normY * srcH - cropH * 0.5));
 
     this.magCtx.clearRect(0, 0, mw, mh);
-    this.magCtx.imageSmoothingEnabled = false;
+    this.magCtx.imageSmoothingEnabled = true;
+    this.magCtx.imageSmoothingQuality = 'high';
 
-    const sourceElem = this.isSimulation ? this.simCanvas : this.procCanvas;
-    const scaleX = sourceElem.width / this.procWidth;
-    const scaleY = sourceElem.height / this.procHeight;
+    this.magCtx.drawImage(this.hiResCanvas, sx, sy, cropW, cropH, 0, 0, mw, mh);
 
-    this.magCtx.drawImage(
-      sourceElem,
-      sx * scaleX,
-      sy * scaleY,
-      cropSize * scaleX,
-      cropSize * scaleY,
-      0, 0, mw, mh
-    );
-
-    // Argon 루페 정밀 분석 링 오버레이
-    this.magCtx.strokeStyle = this.pinnedPoint ? 'rgba(139, 92, 246, 0.8)' : 'rgba(0, 240, 255, 0.75)';
+    // 돋보기 중심 타겟 링
+    const hasConfirmed = this.activeTracks.some(t => t.confirmed);
+    this.magCtx.strokeStyle = this.pinnedPoint
+      ? 'rgba(139, 92, 246, 0.85)'
+      : hasConfirmed
+        ? 'rgba(255, 42, 109, 0.85)'
+        : 'rgba(0, 240, 255, 0.65)';
     this.magCtx.lineWidth = 1.5;
     this.magCtx.beginPath();
-    this.magCtx.arc(mw * 0.5, mh * 0.5, 22, 0, Math.PI * 2);
+    this.magCtx.arc(mw * 0.5, mh * 0.5, 20, 0, Math.PI * 2);
     this.magCtx.stroke();
 
-    if (captionText) {
-      this.magCaption.textContent = captionText;
-    }
-    this.loupeCoord.textContent = `X:${Math.round(procX)} Y:${Math.round(procY)}`;
+    this.magCaption.textContent = captionText;
+    this.loupeCoord.textContent = `${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%`;
   }
 
   // -------------------------------------------------------------
-  // 타겟 알람 & 텔레메트리 평가
+  // 상태 바 & 경보 평가 (확정된 표적만 카운트)
   // -------------------------------------------------------------
-  evaluateTacticalAlarm() {
-    const count = this.detectedTargets.length;
-    this.targetCount.textContent = count < 10 ? `0${count}` : `${count}`;
+  evaluateTacticalAlarm(isCameraSteady) {
+    const confirmedTracks = this.activeTracks.filter(t => t.confirmed);
+    const candidateTracks = this.activeTracks.filter(t => !t.confirmed && t.hitCount >= 4);
+
+    const count = confirmedTracks.length;
+    this.targetCount.textContent = `${count}`;
     this.targetPill.classList.toggle('locked', count > 0);
 
     const now = performance.now();
+
     if (count > 0) {
       this.statusBadge.className = 'argon-status-pill alert';
-      this.statusText.textContent = `TARGET LOCKED (${count})`;
+      this.statusText.textContent = `표적 확정됨 (${count}개)`;
       this.alarmBanner.classList.add('show');
 
       if (this.currentMode === 'spot') {
-        this.alarmTitle.textContent = `MICRO-SPOT LOCKED // 정지 표적 ${count}개`;
-        this.alarmSub.textContent = '우측 하단 광학 루페로 확대 영상을 확인하세요';
+        this.alarmTitle.textContent = `정지 표적 검증 완료 (${count}개)`;
+        this.alarmSub.textContent = '우측 하단 정밀 돋보기에서 실제 벌레 형태인지 확인하세요';
       } else {
-        this.alarmTitle.textContent = `KINETIC TARGET // 비행 모기 포착`;
-        this.alarmSub.textContent = '이동 궤적 및 예상 진행 벡터를 추적 중입니다';
+        this.alarmTitle.textContent = `비행 표적 궤적 확정`;
+        this.alarmSub.textContent = '연속 비행 궤적이 검증되었습니다';
       }
 
-      if (now - this.lastAlarmTime > 420) {
-        const topConf = this.detectedTargets[0]?.confidence || 0.8;
-        this.playArgonSonarPing(topConf);
+      if (now - this.lastAlarmTime > 650) {
+        this.playArgonSonarPing(0.9);
         this.triggerHaptic();
         this.lastAlarmTime = now;
       }
     } else {
-      this.statusBadge.className = 'argon-status-pill active';
-      if (this.stabilityScore < 45) {
-        this.statusText.textContent = 'STABILIZING CAMERA...';
-      } else {
-        this.statusText.textContent = this.isSimulation ? 'SIMULATION // SCANNING' : 'OPTICS ONLINE // SCANNING';
-      }
       this.alarmBanner.classList.remove('show');
+      this.statusBadge.className = 'argon-status-pill active';
+
+      if (!isCameraSteady) {
+        this.statusText.textContent = '카메라 흔들림 보정 대기 중...';
+      } else if (candidateTracks.length > 0) {
+        const maxPct = Math.round(Math.max(...candidateTracks.map(t => t.verificationProgress)) * 100);
+        this.statusText.textContent = `미세 후보 정밀 검증 중 (${maxPct}%)`;
+      } else {
+        this.statusText.textContent = this.isSimulation ? '시뮬레이션 스캔 중' : '정밀 스캔 중 (감지 없음)';
+      }
     }
   }
 
   // -------------------------------------------------------------
-  // ARGON 전술 HUD 오버레이 렌더링
+  // ARGON 전술 HUD 렌더링 (후보 검증 게이지 vs 확정 브라켓 분리 표시)
   // -------------------------------------------------------------
   renderArgonHUD() {
     const ctx = this.overlayCtx;
@@ -959,25 +1155,24 @@ class ArgonBugScanner {
 
     ctx.clearRect(0, 0, w, h);
 
-    // 시뮬레이션 모드일 때는 배경 비디오 대신 가상 캔버스를 화면에 렌더링
     if (this.isSimulation) {
       ctx.save();
       ctx.drawImage(this.simCanvas, 0, 0, w, h);
       ctx.restore();
     }
 
-    // 1. [TRAIL-MAP 모드] 장노출 모션 히트맵 렌더링
+    // 1) 잔상 히트맵 모드 (확정된 궤적만 누적)
     if (this.currentMode === 'trail' && this.heatmapPoints.length > 0) {
       for (const pt of this.heatmapPoints) {
         const age = now - pt.timestamp;
         const life = Math.max(0, 1 - age / 8000);
         const hx = pt.x * w;
         const hy = pt.y * h;
-        const rad = 18 + pt.intensity * 16;
+        const rad = 20;
 
         const grad = ctx.createRadialGradient(hx, hy, 2, hx, hy, rad);
-        grad.addColorStop(0, `rgba(255, 42, 109, ${life * 0.65})`);
-        grad.addColorStop(0.5, `rgba(139, 92, 246, ${life * 0.38})`);
+        grad.addColorStop(0, `rgba(255, 42, 109, ${life * 0.6})`);
+        grad.addColorStop(0.5, `rgba(139, 92, 246, ${life * 0.35})`);
         grad.addColorStop(1, 'rgba(0, 240, 255, 0)');
 
         ctx.fillStyle = grad;
@@ -987,97 +1182,91 @@ class ArgonBugScanner {
       }
     }
 
-    // 2. 비행 궤적 네온 플라즈마 라인 렌더링
-    if ((this.currentMode === 'flight' || this.currentMode === 'trail') && this.recentTrails.length > 1) {
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+    // 2) 트랙별 렌더링 (4프레임 미만 노이즈는 아예 그리지 않음!)
+    for (const track of this.activeTracks) {
+      if (track.hitCount < 4) continue;
 
-      for (let i = 1; i < this.recentTrails.length; i++) {
-        const p1 = this.recentTrails[i - 1];
-        const p2 = this.recentTrails[i];
-        // 너무 멀리 점프한 별개 표적 간 연결 방지
-        if (Math.hypot(p2.x - p1.x, p2.y - p1.y) > 0.2) continue;
+      const tx = track.x * w;
+      const ty = track.y * h;
 
-        const age = now - p2.timestamp;
-        const alpha = Math.max(0, 1 - age / 2000);
+      if (!track.confirmed) {
+        // [A] 검증 중인 후보 (40% ~ 95%): 과장된 경고 박스 대신 차분한 원형 검증 프로그레스 아크 표시
+        const radius = 18;
+        const progress = track.verificationProgress;
 
-        ctx.strokeStyle = `rgba(0, 240, 255, ${alpha * 0.85})`;
-        ctx.lineWidth = 2.5 * alpha + 1;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.3)';
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(p1.x * w, p1.y * h);
-        ctx.lineTo(p2.x * w, p2.y * h);
+        ctx.arc(tx, ty, radius, 0, Math.PI * 2);
         ctx.stroke();
-      }
-    }
 
-    // 3. 포착된 표적(Targets) 전술 락온 브라켓 & 속도 벡터 렌더링
-    this.detectedTargets.forEach((t, idx) => {
-      const tx = t.x * w;
-      const ty = t.y * h;
-      const r = Math.max(20, Math.min(44, t.w * w * 1.4));
-      const isKinetic = t.type === 'kinetic';
-      const mainColor = isKinetic ? '#ff2a6d' : '#00f0ff';
+        // 진행률 호(Arc)
+        ctx.strokeStyle = '#00f0ff';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(tx, ty, radius, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * progress);
+        ctx.stroke();
+
+        ctx.fillStyle = '#00f0ff';
+        ctx.font = '600 10px "JetBrains Mono", sans-serif';
+        ctx.fillText(`검증 ${Math.round(progress * 100)}%`, tx + radius + 6, ty + 3);
+        ctx.restore();
+        continue;
+      }
+
+      // [B] 다중 프레임 검증을 완벽히 통과한 확정 표적 (Confirmed Target)
+      if (track.trail.length > 1 && track.type === 'kinetic') {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.8)';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(track.trail[0].x * w, track.trail[0].y * h);
+        for (let i = 1; i < track.trail.length; i++) {
+          ctx.lineTo(track.trail[i].x * w, track.trail[i].y * h);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      const r = 24;
+      const mainColor = track.type === 'kinetic' ? '#ff2a6d' : '#00ff9d';
 
       ctx.save();
       ctx.strokeStyle = mainColor;
-      ctx.fillStyle = mainColor;
-      ctx.lineWidth = 1.8;
+      ctx.lineWidth = 2;
 
-      // 외곽 코너 락온 박스 (Argon Tactical Bracket)
-      const cLen = r * 0.45;
+      const cLen = 9;
       ctx.beginPath();
-      // 좌상
       ctx.moveTo(tx - r, ty - r + cLen); ctx.lineTo(tx - r, ty - r); ctx.lineTo(tx - r + cLen, ty - r);
-      // 우상
       ctx.moveTo(tx + r - cLen, ty - r); ctx.lineTo(tx + r, ty - r); ctx.lineTo(tx + r, ty - r + cLen);
-      // 좌하
       ctx.moveTo(tx - r, ty + r - cLen); ctx.lineTo(tx - r, ty + r); ctx.lineTo(tx - r + cLen, ty + r);
-      // 우하
       ctx.moveTo(tx + r - cLen, ty + r); ctx.lineTo(tx + r, ty + r); ctx.lineTo(tx + r, ty + r - cLen);
       ctx.stroke();
 
-      // 내부 회전/펄스 원
       ctx.beginPath();
-      ctx.arc(tx, ty, r * 0.55, 0, Math.PI * 2);
-      ctx.strokeStyle = isKinetic ? 'rgba(255, 42, 109, 0.55)' : 'rgba(0, 240, 255, 0.55)';
-      ctx.stroke();
+      ctx.arc(tx, ty, 4, 0, Math.PI * 2);
+      ctx.fillStyle = mainColor;
+      ctx.fill();
 
-      // 비행 속도 벡터 화살표 (예상 이동 방향 표시)
-      if (isKinetic && (Math.abs(t.vx) > 0.001 || Math.abs(t.vy) > 0.001)) {
-        const vxPx = t.vx * w * 5.5;
-        const vyPx = t.vy * h * 5.5;
-        ctx.strokeStyle = '#00ff9d';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(tx, ty);
-        ctx.lineTo(tx + vxPx, ty + vyPx);
-        ctx.stroke();
+      const label = track.type === 'kinetic'
+        ? `확정 비행체 #${track.id}`
+        : `확정 암점 (대비 +${track.contrast})`;
 
-        ctx.fillStyle = '#00ff9d';
-        ctx.beginPath();
-        ctx.arc(tx + vxPx, ty + vyPx, 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // 전술 데이터 태그 라벨
-      ctx.font = '700 10px "JetBrains Mono", monospace';
-      const tagCode = isKinetic
-        ? `TGT-0${idx + 1} // FLY ${Math.round(t.confidence * 100)}%`
-        : `TGT-0${idx + 1} // Δ${t.contrast}`;
-
-      const textWidth = ctx.measureText(tagCode).width;
-      ctx.fillStyle = 'rgba(5, 7, 12, 0.82)';
-      ctx.fillRect(tx + r + 5, ty - 14, textWidth + 10, 18);
+      ctx.font = '700 11px "Pretendard", sans-serif';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(5, 7, 12, 0.85)';
+      ctx.fillRect(tx + r + 6, ty - 11, tw + 12, 20);
       ctx.strokeStyle = mainColor;
       ctx.lineWidth = 1;
-      ctx.strokeRect(tx + r + 5, ty - 14, textWidth + 10, 18);
+      ctx.strokeRect(tx + r + 6, ty - 11, tw + 12, 20);
 
-      ctx.fillStyle = '#f8fafc';
-      ctx.fillText(tagCode, tx + r + 10, ty - 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(label, tx + r + 12, ty + 3);
       ctx.restore();
-    });
+    }
 
-    // 4. 사용자 터치 고정 지점(Pinpoint Lock) 마커 렌더링
+    // 3) 사용자 수동 터치 확대 지점 표시
     if (this.pinnedPoint) {
       const px = this.pinnedPoint.x * w;
       const py = this.pinnedPoint.y * h;
@@ -1089,14 +1278,9 @@ class ArgonBugScanner {
       ctx.arc(px, py, 16, 0, Math.PI * 2);
       ctx.stroke();
 
-      ctx.beginPath();
-      ctx.moveTo(px - 22, py); ctx.lineTo(px + 22, py);
-      ctx.moveTo(px, py - 22); ctx.lineTo(px, py + 22);
-      ctx.stroke();
-
       ctx.fillStyle = '#c4b5fd';
-      ctx.font = '700 10px "JetBrains Mono", monospace';
-      ctx.fillText('LOUPE LOCK', px + 20, py - 6);
+      ctx.font = '700 10px sans-serif';
+      ctx.fillText('수동 확대 지점', px + 20, py + 4);
       ctx.restore();
     }
   }
@@ -1105,13 +1289,13 @@ class ArgonBugScanner {
     const w = this.cssWidth || this.overlayCanvas.width;
     const h = this.cssHeight || this.overlayCanvas.height;
     this.overlayCtx.clearRect(0, 0, w, h);
-    this.targetCount.textContent = '00';
+    this.targetCount.textContent = '0';
     this.targetPill.classList.remove('locked');
     this.alarmBanner.classList.remove('show');
   }
 
   // -------------------------------------------------------------
-  // 고해상도 스냅샷 캡처 & 미니 프리뷰 토스트
+  // 고해상도 스냅샷 캡처
   // -------------------------------------------------------------
   takeSnapshot() {
     const snapCanvas = document.createElement('canvas');
@@ -1121,7 +1305,6 @@ class ArgonBugScanner {
     snapCanvas.height = sh;
     const ctx = snapCanvas.getContext('2d');
 
-    // 1. 광학 필터 적용 후 비디오/시뮬레이션 원본 그리기
     const filterCss = getComputedStyle(this.video).filter;
     if (filterCss && filterCss !== 'none') {
       ctx.filter = filterCss;
@@ -1133,24 +1316,20 @@ class ArgonBugScanner {
     }
     ctx.filter = 'none';
 
-    // 2. HUD 오버레이 합성
     ctx.drawImage(this.overlayCanvas, 0, 0, sw, sh);
 
-    // 3. Argon 텔레메트리 워터마크 바
-    ctx.fillStyle = 'rgba(5, 7, 12, 0.78)';
-    ctx.fillRect(0, sh - 42, sw, 42);
+    ctx.fillStyle = 'rgba(5, 7, 12, 0.8)';
+    ctx.fillRect(0, sh - 40, sw, 40);
     ctx.fillStyle = '#00f0ff';
-    ctx.font = 'bold 15px monospace';
+    ctx.font = 'bold 14px monospace';
     const stamp = new Date().toLocaleString('ko-KR');
     ctx.fillText(
-      `ARGON OPTICS [Ar-18] // MODE: ${this.currentMode.toUpperCase()} // FILTER: ${this.currentFilter.toUpperCase()} // ${stamp}`,
-      18,
-      sh - 16
+      `ARGON OPTICS [Ar-18] // MODE: ${this.currentMode.toUpperCase()} // ${stamp}`,
+      16,
+      sh - 15
     );
 
     const dataUrl = snapCanvas.toDataURL('image/png');
-
-    // 인앱 프리뷰 토스트 표시
     const toast = document.getElementById('snapshotToast');
     const thumb = document.getElementById('snapshotThumb');
     const dlLink = document.getElementById('snapshotDownloadLink');
@@ -1161,7 +1340,6 @@ class ArgonBugScanner {
     dlLink.download = fileName;
     toast.classList.remove('hidden');
 
-    // 자동 다운로드 트리거
     const tempLink = document.createElement('a');
     tempLink.download = fileName;
     tempLink.href = dataUrl;

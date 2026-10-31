@@ -29,24 +29,24 @@
           <div class="argon-status-pill" id="statusBadge">
             <div class="ar-element-box">Ar<sub>18</sub></div>
             <span class="status-led"></span>
-            <span class="status-label" id="statusText">SYSTEM STANDBY</span>
+            <span class="status-label" id="statusText">스캐너 대기 중</span>
           </div>
 
           <!-- 우측: 실시간 텔레메트리 계기판 -->
           <div class="telemetry-cluster">
-            <div class="telemetry-item" title="카메라 흔들림 안정도">
-              <span class="tel-key">STAB</span>
+            <div class="telemetry-item" title="카메라 고정 안정도 (높을수록 오탐이 줄어듭니다)">
+              <span class="tel-key">안정도</span>
               <div class="stab-bar-wrap">
                 <div class="stab-bar-fill" id="stabBarFill"></div>
               </div>
             </div>
-            <div class="telemetry-item">
-              <span class="tel-key">FPS</span>
-              <span class="tel-val" id="fpsCounter">--</span>
+            <div class="telemetry-item" title="배경 노이즈 레벨">
+              <span class="tel-key">노이즈</span>
+              <span class="tel-val" id="fpsCounter">낮음</span>
             </div>
             <div class="telemetry-item target-pill" id="targetPill">
-              <span class="tel-key">TGT</span>
-              <span class="tel-val" id="targetCount">00</span>
+              <span class="tel-key">확정</span>
+              <span class="tel-val" id="targetCount">0</span>
             </div>
           </div>
         </header>
@@ -98,19 +98,19 @@
             <line class="ret-cross" x1="154" y1="100" x2="176" y2="100" />
             <circle class="ret-center" cx="100" cy="100" r="3" />
           </svg>
-          <div class="reticle-hint" id="reticleHint">화면을 터치하면 해당 지점을 정밀 확대합니다</div>
+          <div class="reticle-hint" id="reticleHint">카메라를 천천히 움직이거나 멈춰서 조준하세요 (화면 터치 시 해당 위치 확대)</div>
         </div>
 
         <!-- 우측 하단 플로팅: Argon 정밀 광학 루페 (PIP Magnifier) -->
         <aside class="argon-loupe-card" id="magnifierCard">
           <div class="loupe-header">
             <div class="loupe-title">
-              <span class="loupe-badge" id="loupeModeBadge">AUTO</span>
-              <span>OPTIC LOUPE</span>
+              <span class="loupe-badge" id="loupeModeBadge">중앙조준</span>
+              <span>정밀 돋보기</span>
             </div>
             <div class="loupe-actions">
               <button id="loupePowerBtn" class="loupe-mini-btn" title="배율 전환 (4x / 8x)">4X</button>
-              <button id="resetPinBtn" class="loupe-mini-btn hidden" title="자동 추적으로 복귀">AUTO</button>
+              <button id="resetPinBtn" class="loupe-mini-btn hidden" title="중앙 조준으로 복귀">해제</button>
               <button id="closeMagBtn" class="loupe-mini-btn" title="루페 접기">―</button>
             </div>
           </div>
@@ -119,8 +119,8 @@
             <div class="loupe-crosshair"></div>
           </div>
           <div class="loupe-footer">
-            <span id="magCaption">대비 분석 대기 중</span>
-            <span class="loupe-coord" id="loupeCoord">X:-- Y:--</span>
+            <span id="magCaption">중앙 십자선 확대 중</span>
+            <span class="loupe-coord" id="loupeCoord">CENTER</span>
           </div>
         </aside>
 
