@@ -1,11 +1,11 @@
 {
-  "name": "BugFinder AI - 벌레 탐지기",
-  "short_name": "벌레탐지기",
-  "description": "핸드폰 카메라로 모기와 벌레를 실시간 추적 및 감지하는 웹앱",
+  "name": "ARGON OPTICS // 모기·벌레 전술 스캐너",
+  "short_name": "ARGON 스캐너",
+  "description": "아르곤 고대비 광학 필터 및 실시간 모션 벡터·점 분석 기반 모기·벌레 탐지 웹앱",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#080b10",
-  "theme_color": "#0d1117",
+  "background_color": "#05070c",
+  "theme_color": "#05070c",
   "orientation": "portrait",
   "icons": [
     {

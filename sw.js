@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bugfinder-cache-v1';
+const CACHE_NAME = 'argon-optics-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -27,7 +27,14 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
+  // 네트워크 우선(Network-first), 오프라인 시 캐시 폴백으로 항상 최신 버전 보장
   e.respondWith(
-    caches.match(e.request).then((res) => res || fetch(e.request))
+    fetch(e.request)
+      .then((res) => {
+        const clone = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
