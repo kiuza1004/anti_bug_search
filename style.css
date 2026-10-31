@@ -76,13 +76,28 @@ html, body {
   cursor: crosshair;
 }
 
-#cameraVideo {
+#cameraVideo,
+#nightVisionCanvas {
   position: absolute;
   width: 100%;
   height: 100%;
   object-fit: cover;
   transform-origin: center center;
   transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), filter 0.3s ease;
+}
+
+#nightVisionCanvas {
+  z-index: 1;
+}
+
+/* 화면 백라이트 광원 링 (토치 미지원/근거리 보조 조명) */
+.screen-torch-ring {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  border: 18px solid #ffffff;
+  box-shadow: inset 0 0 55px rgba(255, 255, 255, 0.95), 0 0 40px rgba(255, 255, 255, 0.95);
 }
 
 /* Argon 광학 스펙트럼 필터 모드 */
@@ -345,6 +360,53 @@ html, body {
 .chip-dot.ar  { background: var(--ar-cyan); box-shadow: 0 0 6px var(--ar-cyan); }
 .chip-dot.nv  { background: var(--ar-emerald); box-shadow: 0 0 6px var(--ar-emerald); }
 .chip-dot.inv { background: var(--ar-violet); box-shadow: 0 0 6px var(--ar-violet); }
+
+/* 저조도 야간 투시 세부 제어 바 */
+.night-isp-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  background: rgba(6, 20, 16, 0.85);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(0, 255, 157, 0.4);
+  padding: 5px 10px;
+  border-radius: 10px;
+  pointer-events: auto;
+  box-shadow: 0 4px 18px rgba(0, 255, 157, 0.15);
+}
+
+.isp-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ar-emerald);
+}
+
+.isp-gain-group {
+  display: flex;
+  gap: 4px;
+}
+
+.isp-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--ar-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.isp-btn.active {
+  background: rgba(0, 255, 157, 0.22);
+  border-color: var(--ar-emerald);
+  color: #ffffff;
+  font-weight: 800;
+}
 
 /* ==========================================================================
    3. 중앙 전술 레티클 & 타겟 경고 배너

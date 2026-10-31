@@ -15,8 +15,13 @@
     <!-- ==================== 메인 광학 뷰포트 ==================== -->
     <main class="viewport-stage" id="viewportStage">
       <video id="cameraVideo" playsinline autoplay muted></video>
+      <!-- 실시간 저조도 다중프레임 적분 & 감마 증폭 렌더링 캔버스 -->
+      <canvas id="nightVisionCanvas" class="hidden"></canvas>
       <!-- 잔상 누적용 오프스크린/배경 레이어 및 메인 HUD 캔버스 -->
       <canvas id="detectionCanvas"></canvas>
+
+      <!-- 화면 백라이트 보조 조명 링 (플래시 미지원 기기 또는 근접 탐색용) -->
+      <div class="screen-torch-ring hidden" id="screenTorchRing"></div>
 
       <!-- 비네팅 & 스캔라인 광학 효과 레이어 -->
       <div class="optic-vignette"></div>
@@ -54,18 +59,28 @@
         <!-- 2단 상단 바: 광학 비전 스펙트럼 필터 선택기 -->
         <nav class="optic-filter-bar" aria-label="광학 비전 필터">
           <button class="filter-chip active" data-filter="standard">
-            <span class="chip-dot std"></span>표준 광학
+            <span class="chip-dot std"></span>표준 (주간/자동)
+          </button>
+          <button class="filter-chip" data-filter="night" id="nightFilterChip">
+            <span class="chip-dot nv"></span>야간 투시 (저조도 증폭)
           </button>
           <button class="filter-chip" data-filter="argon">
             <span class="chip-dot ar"></span>아르곤 고대비
-          </button>
-          <button class="filter-chip" data-filter="night">
-            <span class="chip-dot nv"></span>야간 증폭
           </button>
           <button class="filter-chip" data-filter="invert">
             <span class="chip-dot inv"></span>반전 스펙트럼
           </button>
         </nav>
+
+        <!-- 저조도 야간 투시 세부 제어 바 (야간 투시 모드 또는 어두운 곳에서 활성화) -->
+        <div class="night-isp-bar hidden" id="nightIspBar">
+          <span class="isp-label" id="luxMeterLabel">조도: 측정 중</span>
+          <div class="isp-gain-group">
+            <button class="isp-btn active" data-ngain="mid">선명 증폭</button>
+            <button class="isp-btn" data-ngain="max">극저조도 4x</button>
+            <button class="isp-btn" data-ngain="mono">야간 윤곽선</button>
+          </div>
+        </div>
 
         <!-- 타겟 포착 경고 배너 -->
         <div class="argon-alert-banner" id="alarmBanner">
