@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argon-optics-v5';
+const CACHE_NAME = 'argon-optics-v6';
 const ASSETS = [
   './',
   './index.html',

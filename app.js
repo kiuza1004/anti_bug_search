@@ -504,16 +504,21 @@ class ArgonBugScanner {
     });
 
     if (mode === 'flight') {
-      this.reticle.style.opacity = '0.45';
-      this.reticleHint.textContent = '카메라를 고정하고 허공이나 벽면을 비추면 날아가는 모기만 포착합니다';
+      this.reticle.style.opacity = '0.32';
+      if (!this.pinnedPoint) {
+        this.magCard.classList.add('hidden');
+        this.restoreMagBtn.classList.remove('hidden');
+      }
     } else if (mode === 'spot') {
-      this.reticle.style.opacity = '0.95';
+      this.reticle.style.opacity = '0.75';
       this.magCard.classList.remove('hidden');
       this.restoreMagBtn.classList.add('hidden');
-      this.reticleHint.textContent = '벽면의 의심스러운 검은 점을 중앙 원 안에 맞추고 잠시 멈추세요';
     } else if (mode === 'trail') {
-      this.reticle.style.opacity = '0.35';
-      this.reticleHint.textContent = '카메라를 고정해 두면 검증된 비행 궤적이 히트맵으로 누적됩니다';
+      this.reticle.style.opacity = '0.25';
+      if (!this.pinnedPoint) {
+        this.magCard.classList.add('hidden');
+        this.restoreMagBtn.classList.remove('hidden');
+      }
     }
 
     this.resetTrackingBuffers();
@@ -658,25 +663,20 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // [핵심] 밝기 울렁거림(플리커링/펌핑) 없이 항상 일괄적으로 환하게 밝히는 고정 LUT 생성
-  // - 매 프레임 히스토그램에 따라 배율을 바꾸지 않고, 선택된 게인 모드의 고정 비선형 커브를 유지!
+  // [핵심] 밝은 부분이 하얗게 날아가지(White Blowout) 않으면서 어두운 암부만 일괄 증폭하는 고정 LUT
   // -------------------------------------------------------------
   buildLockedNightLUT() {
-    let ceiling = 165; // 암부~중간톤을 255로 끌어올리는 고정 상한점
-    let gamma = 0.42;  // 비선형 암부 리프트 지수
+    // ceiling으로 상한을 자르지 않고 0~255 전 구간을 보존하여 하이라이트 백화(하얗게 타는 현상) 완벽 방지!
+    let gamma = 0.48; // 1단: 암부는 약 2.5배 밝히고 밝은 물체 디테일은 그대로 보존
 
     if (this.nightGainMode === 'max') {
-      // 극저조도 4x: 매우 어두운 방에서도 항상 일괄적으로 환하게 보이도록 강한 고정 커브 적용
-      ceiling = 110;
-      gamma = 0.32;
+      gamma = 0.34;   // 2단(강): 칠흑 같은 어둠에서 암부를 약 4배 강하게 리프트
     } else if (this.nightGainMode === 'mono') {
-      ceiling = 135;
-      gamma = 0.36;
+      gamma = 0.40;
     }
 
     for (let v = 0; v < 256; v++) {
-      // 0~255 전 구간에서 단 하나의 불연속 점프도 없는 매끄러운 단조 증가 곡선
-      const norm = Math.min(1.0, v / ceiling);
+      const norm = v / 255.0;
       this.nvLut[v] = Math.min(255, Math.round(Math.pow(norm, gamma) * 255));
     }
   }
@@ -694,7 +694,7 @@ class ArgonBugScanner {
     const data = imgData.data;
     const totalPixels = nw * nh;
 
-    // 1) 현재 원본 프레임의 평균 밝기 측정 (히스테리시스 적용)
+    // 1) 현재 원본 프레임의 평균 밝기 측정
     let lumSum = 0;
     let sampleCnt = 0;
     for (let i = 0; i < data.length; i += 32) {
@@ -704,23 +704,21 @@ class ArgonBugScanner {
     const rawBrightness = lumSum / sampleCnt;
     this.ambientBrightness = Math.round(this.ambientBrightness * 0.85 + rawBrightness * 0.15);
 
-    // 2) 표준(자동) 모드에서 어두운 곳 감지 시 켜짐/꺼짐 반복(깜빡임) 방지:
-    //    - 어두운 상태(< 40)가 연속 15프레임 지속되면 켜고,
-    //    - 한 번 켜지면 실제로 방 불을 환하게 켠 상태(> 105)가 연속 60프레임(2초) 지속되기 전에는 절대 끄지 않음!
-    //    - 또한 도중에 하드웨어 노출(applyHardwareLowLightExposure)을 건드리지 않아 카메라 AE 헌팅을 막음!
+    // 2) 주간/자동(standard) 모드에서는 정말로 어두운 곳(평균 밝기 < 26)일 때만 자동 개입하여
+    //    일반 실내 조명 아래에서 화면이 하얗게 과노출되는 현상을 방지
     if (this.currentFilter === 'standard') {
-      if (this.ambientBrightness < 40) {
+      if (this.ambientBrightness < 26) {
         this.darkFrameStreak++;
         this.brightFrameStreak = 0;
-        if (this.darkFrameStreak >= 15 && !this.autoNightActive) {
+        if (this.darkFrameStreak >= 20 && !this.autoNightActive) {
           this.autoNightActive = true;
           this.nightIspBar.classList.remove('hidden');
           this.nvCanvas.classList.remove('hidden');
         }
-      } else if (this.ambientBrightness > 105) {
+      } else if (this.ambientBrightness > 70) {
         this.brightFrameStreak++;
         this.darkFrameStreak = 0;
-        if (this.brightFrameStreak >= 60 && this.autoNightActive) {
+        if (this.brightFrameStreak >= 45 && this.autoNightActive) {
           this.autoNightActive = false;
           this.nightIspBar.classList.add('hidden');
           this.nvCanvas.classList.add('hidden');
