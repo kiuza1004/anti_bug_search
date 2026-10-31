@@ -59,10 +59,14 @@ class ArgonBugScanner {
     this.nvCanvas.width = this.nvWidth;
     this.nvCanvas.height = this.nvHeight;
     this.nvAccumBuffer = null; // Float32Array 다중 프레임 시간축 적분 버퍼
-    this.nvLut = new Uint8Array(256); // 256단계 비선형 암부 감마 + 스트레칭 룩업 테이블
+    this.nvLut = new Uint8Array(256); // 256단계 고정 일괄 증폭 룩업 테이블
     this.nightGainMode = 'mid'; // 'mid' (선명 증폭) | 'max' (극저조도 4x) | 'mono' (야간 윤곽선)
     this.ambientBrightness = 120; // 현재 프레임 평균 밝기 (0~255)
     this.autoNightActive = false; // 주간/자동 모드에서 어두운 곳 감지 시 자동 야간 ISP 개입 플래그
+    this.darkFrameStreak = 0;     // 어두운 상태 연속 프레임 카운터 (깜빡임 방지 히스테리시스)
+    this.brightFrameStreak = 0;   // 밝은 상태 연속 프레임 카운터
+
+    this.buildLockedNightLUT();
 
     // 오프스크린 비전 탐지 해상도 (240x180)
     this.procWidth = 240;
@@ -174,7 +178,7 @@ class ArgonBugScanner {
         document.querySelectorAll('[data-ngain]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         this.nightGainMode = btn.dataset.ngain;
-        this.nvAccumBuffer = null;
+        this.buildLockedNightLUT();
       });
     });
 
@@ -654,46 +658,76 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // [핵심 신규] 진짜 저조도 야간 투시 엔진 (Real Low-Light Night Vision ISP)
-  // - 맨눈으로 식별 불가한 암부(밝기 3~45)를 히스토그램 스트레칭 + 감마 LUT로 증폭
-  // - 시간축 다중 프레임 적분(Temporal Stacking)으로 저조도 열잡음(Shot noise) 제거
+  // [핵심] 밝기 울렁거림(플리커링/펌핑) 없이 항상 일괄적으로 환하게 밝히는 고정 LUT 생성
+  // - 매 프레임 히스토그램에 따라 배율을 바꾸지 않고, 선택된 게인 모드의 고정 비선형 커브를 유지!
+  // -------------------------------------------------------------
+  buildLockedNightLUT() {
+    let ceiling = 165; // 암부~중간톤을 255로 끌어올리는 고정 상한점
+    let gamma = 0.42;  // 비선형 암부 리프트 지수
+
+    if (this.nightGainMode === 'max') {
+      // 극저조도 4x: 매우 어두운 방에서도 항상 일괄적으로 환하게 보이도록 강한 고정 커브 적용
+      ceiling = 110;
+      gamma = 0.32;
+    } else if (this.nightGainMode === 'mono') {
+      ceiling = 135;
+      gamma = 0.36;
+    }
+
+    for (let v = 0; v < 256; v++) {
+      // 0~255 전 구간에서 단 하나의 불연속 점프도 없는 매끄러운 단조 증가 곡선
+      const norm = Math.min(1.0, v / ceiling);
+      this.nvLut[v] = Math.min(255, Math.round(Math.pow(norm, gamma) * 255));
+    }
+  }
+
+  // -------------------------------------------------------------
+  // 진짜 저조도 야간 투시 엔진 (Constant-Gain Real Night Vision ISP)
+  // - 깜빡임(밝고 어둡고 반복) 원천 제거: 고정 LUT + 하드웨어 AE 재호출 금지 + 강한 히스테리시스
   // -------------------------------------------------------------
   evaluateAndRunNightVisionISP(rawSource) {
     const nw = this.nvWidth;
     const nh = this.nvHeight;
 
-    // 원본 영상을 nvCanvas에 먼저 그리기
     this.nvCtx.drawImage(rawSource, 0, 0, nw, nh);
     const imgData = this.nvCtx.getImageData(0, 0, nw, nh);
     const data = imgData.data;
     const totalPixels = nw * nh;
 
-    // 1) 샘플링 히스토그램 분석 (주변 밝기 및 암부/명부 경계 파악)
-    const hist = new Uint32Array(256);
+    // 1) 현재 원본 프레임의 평균 밝기 측정 (히스테리시스 적용)
     let lumSum = 0;
     let sampleCnt = 0;
-
-    for (let i = 0; i < data.length; i += 16) {
-      const lum = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
-      hist[lum]++;
-      lumSum += lum;
+    for (let i = 0; i < data.length; i += 32) {
+      lumSum += (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
       sampleCnt++;
     }
+    const rawBrightness = lumSum / sampleCnt;
+    this.ambientBrightness = Math.round(this.ambientBrightness * 0.85 + rawBrightness * 0.15);
 
-    this.ambientBrightness = Math.round(lumSum / sampleCnt);
-
-    // 표준(자동) 모드에서 주변이 매우 어두우면(평균 밝기 < 45) 자동으로 야간 투시 ISP 가동!
+    // 2) 표준(자동) 모드에서 어두운 곳 감지 시 켜짐/꺼짐 반복(깜빡임) 방지:
+    //    - 어두운 상태(< 40)가 연속 15프레임 지속되면 켜고,
+    //    - 한 번 켜지면 실제로 방 불을 환하게 켠 상태(> 105)가 연속 60프레임(2초) 지속되기 전에는 절대 끄지 않음!
+    //    - 또한 도중에 하드웨어 노출(applyHardwareLowLightExposure)을 건드리지 않아 카메라 AE 헌팅을 막음!
     if (this.currentFilter === 'standard') {
-      if (this.ambientBrightness < 42 && !this.autoNightActive) {
-        this.autoNightActive = true;
-        this.nightIspBar.classList.remove('hidden');
-        this.nvCanvas.classList.remove('hidden');
-        this.applyHardwareLowLightExposure(true);
-      } else if (this.ambientBrightness > 62 && this.autoNightActive) {
-        this.autoNightActive = false;
-        this.nightIspBar.classList.add('hidden');
-        this.nvCanvas.classList.add('hidden');
-        this.applyHardwareLowLightExposure(false);
+      if (this.ambientBrightness < 40) {
+        this.darkFrameStreak++;
+        this.brightFrameStreak = 0;
+        if (this.darkFrameStreak >= 15 && !this.autoNightActive) {
+          this.autoNightActive = true;
+          this.nightIspBar.classList.remove('hidden');
+          this.nvCanvas.classList.remove('hidden');
+        }
+      } else if (this.ambientBrightness > 105) {
+        this.brightFrameStreak++;
+        this.darkFrameStreak = 0;
+        if (this.brightFrameStreak >= 60 && this.autoNightActive) {
+          this.autoNightActive = false;
+          this.nightIspBar.classList.add('hidden');
+          this.nvCanvas.classList.add('hidden');
+        }
+      } else {
+        this.darkFrameStreak = 0;
+        this.brightFrameStreak = 0;
       }
     }
 
@@ -702,66 +736,22 @@ class ArgonBugScanner {
       return false;
     }
 
-    // 조도 상태 텍스트 업데이트
     const estLux = Math.max(1, Math.round(Math.pow(this.ambientBrightness / 12, 2.1)));
-    this.luxMeterLabel.textContent = this.ambientBrightness < 45
-      ? `저조도 (${estLux} lx) · 암부 증폭 중`
-      : `조도 ${estLux} lx · 야간투시 가동`;
+    this.luxMeterLabel.textContent = `조도 ${estLux} lx · 고정 밝기 증폭 중`;
 
-    // 2) 하위 2% (Black Point) 및 상위 98.5% (White Point) 검출로 다이내믹 레인지 자동 확장
-    let blackPt = 0;
-    let whitePt = 255;
-    let acc = 0;
-    const lowTarget = sampleCnt * 0.02;
-    const highTarget = sampleCnt * 0.985;
-
-    for (let v = 0; v < 256; v++) {
-      acc += hist[v];
-      if (acc <= lowTarget) blackPt = v;
-      if (acc >= highTarget) {
-        whitePt = v;
-        break;
-      }
-    }
-
-    // 어두운 곳에서 과도한 클리핑 방지 및 최소 범위 보장
-    blackPt = Math.min(25, Math.max(0, blackPt - 2));
-    whitePt = Math.max(blackPt + 35, Math.min(230, whitePt));
-
-    // 게인 모드별 비선형 감마 지수 설정 (작을수록 어두운 그림자 속 물체를 강하게 끌어올림)
-    let gamma = 0.44; // 'mid': 자연스럽고 선명한 암부 증폭
-    if (this.nightGainMode === 'max') gamma = 0.30; // 'max': 칠흑 같은 어둠용 극저조도 4x 증폭
-    else if (this.nightGainMode === 'mono') gamma = 0.36;
-
-    // 3) 256단계 룩업 테이블(LUT) 생성
-    const range = whitePt - blackPt;
-    for (let v = 0; v < 256; v++) {
-      if (v <= blackPt) {
-        this.nvLut[v] = 0;
-      } else if (v >= whitePt) {
-        this.nvLut[v] = 255;
-      } else {
-        const norm = (v - blackPt) / range;
-        this.nvLut[v] = Math.min(255, Math.round(Math.pow(norm, gamma) * 255));
-      }
-    }
-
-    // 4) 다중 프레임 시간축 적분(Temporal Frame Stacking)으로 암부 열잡음(Shot Noise) 제거
+    // 3) 다중 프레임 시간축 적분 버퍼 초기화
+    const lut = this.nvLut;
     if (!this.nvAccumBuffer || this.nvAccumBuffer.length !== totalPixels * 3) {
       this.nvAccumBuffer = new Float32Array(totalPixels * 3);
       for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
-        this.nvAccumBuffer[j] = this.nvLut[data[i]];
-        this.nvAccumBuffer[j + 1] = this.nvLut[data[i + 1]];
-        this.nvAccumBuffer[j + 2] = this.nvLut[data[i + 2]];
+        this.nvAccumBuffer[j] = lut[data[i]];
+        this.nvAccumBuffer[j + 1] = lut[data[i + 1]];
+        this.nvAccumBuffer[j + 2] = lut[data[i + 2]];
       }
     }
 
-    // 카메라가 흔들리지 않을 때는 최대 4~5프레임을 누적 평균(alpha=0.72)하여 노이즈를 1/2 이하로 억제!
-    // 카메라 이동 중일 때는 잔상(Ghosting)이 생기지 않도록 즉시 반응(alpha=0.22)
-    const stackAlpha = this.stabilityScore >= 75 ? 0.70 : 0.20;
-    const invAlpha = 1 - stackAlpha;
+    // 4) 불연속 나눗셈(ratio) 없이 고정 LUT로 일괄 변환 + 픽셀별 모션 적응형 노이즈 제거
     const isMono = this.nightGainMode === 'mono';
-    const lut = this.nvLut;
     const accum = this.nvAccumBuffer;
 
     for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
@@ -769,28 +759,32 @@ class ArgonBugScanner {
       const g = data[i + 1];
       const b = data[i + 2];
 
-      // 저조도에서는 R/B 채널에 지저분한 색 노이즈(Chroma Noise)가 끼므로
-      // 휘도(Luminance) 비중을 섞어 색 노이즈를 정제한 뒤 LUT 증폭 적용
       const lum = (r * 77 + g * 150 + b * 29) >> 8;
       const liftedLum = lut[lum];
 
       if (isMono) {
-        // 야간 윤곽선(Mono): 인간 시신경(간상세포)이 가장 선명하게 인식하는 고대비 에메랄드-시안 톤
-        const curVal = accum[j + 1] * stackAlpha + liftedLum * invAlpha;
+        const prevG = accum[j + 1];
+        // 픽셀 변화가 작으면(정지 배경 노이즈) 0.72 가중치로 부드럽게 평균, 움직임이 크면 즉시 반영
+        const alpha = Math.abs(liftedLum - prevG) < 28 ? 0.72 : 0.25;
+        const curVal = prevG * alpha + liftedLum * (1 - alpha);
         accum[j + 1] = curVal;
-        data[i] = curVal * 0.25;     // R
-        data[i + 1] = curVal;        // G (최대 해상력)
-        data[i + 2] = curVal * 0.78; // B
-      } else {
-        // 컬러 유지 선명 증폭: 색 노이즈는 누르고 밝기와 벽면 점 대비는 대폭 상승
-        const ratio = lum > 4 ? liftedLum / lum : 2.5;
-        const nr = Math.min(255, (r * 0.6 + lum * 0.4) * ratio);
-        const ng = Math.min(255, (g * 0.7 + lum * 0.3) * ratio);
-        const nb = Math.min(255, (b * 0.6 + lum * 0.4) * ratio);
 
-        const ar = accum[j] * stackAlpha + nr * invAlpha;
-        const ag = accum[j + 1] * stackAlpha + ng * invAlpha;
-        const ab = accum[j + 2] * stackAlpha + nb * invAlpha;
+        data[i] = curVal * 0.25;
+        data[i + 1] = curVal;
+        data[i + 2] = curVal * 0.78;
+      } else {
+        // 각 채널을 고정 LUT에 직접 통과시킨 뒤 휘도와 블렌딩하여 색 노이즈 억제 & 밝기 완전 고정
+        const nr = lut[r] * 0.55 + liftedLum * 0.45;
+        const ng = lut[g] * 0.65 + liftedLum * 0.35;
+        const nb = lut[b] * 0.55 + liftedLum * 0.45;
+
+        const prevG = accum[j + 1];
+        const alpha = Math.abs(ng - prevG) < 28 ? 0.72 : 0.25;
+        const invAlpha = 1 - alpha;
+
+        const ar = accum[j] * alpha + nr * invAlpha;
+        const ag = prevG * alpha + ng * invAlpha;
+        const ab = accum[j + 2] * alpha + nb * invAlpha;
 
         accum[j] = ar;
         accum[j + 1] = ag;
