@@ -1412,19 +1412,36 @@ class ArgonBugScanner {
       }
     }
 
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+
     for (const track of this.activeTracks) {
       if (track.hitCount < 4) continue;
 
       const tx = track.x * w;
       const ty = track.y * h;
+      const dist = Math.hypot(tx - cx, ty - cy);
+      const angle = Math.atan2(ty - cy, tx - cx);
 
       if (!track.confirmed) {
         const radius = 18;
         const progress = track.verificationProgress;
 
+        // 1. 전술 조준선에서 표적으로 뻗어나가는 청록색 스캔 유도 레이저 (점선 빔)
         ctx.save();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.45)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 5]);
+        ctx.lineDashOffset = -now * 0.025;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+
+        // 2. 표적 위치 검증 링
         ctx.strokeStyle = 'rgba(0, 240, 255, 0.3)';
         ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
         ctx.beginPath();
         ctx.arc(tx, ty, radius, 0, Math.PI * 2);
         ctx.stroke();
@@ -1437,14 +1454,86 @@ class ArgonBugScanner {
 
         ctx.fillStyle = '#00f0ff';
         ctx.font = '600 10px "JetBrains Mono", sans-serif';
-        ctx.fillText(`검증 ${Math.round(progress * 100)}%`, tx + radius + 6, ty + 3);
+        ctx.fillText(`스캔 레이저 ${Math.round(progress * 100)}%`, tx + radius + 6, ty + 3);
         ctx.restore();
         continue;
       }
 
+      // -------------------------------------------------------------
+      // [핵심] 조준된 대상을 향해 레이저를 쏘며 강렬하게 지목하는 전술 퍼포먼스
+      // -------------------------------------------------------------
+      const mainColor = track.type === 'kinetic' ? '#ff2a6d' : '#00ff9d';
+      const laserPulse = 0.85 + 0.15 * Math.sin(now * 0.018 + track.id);
+
+      ctx.save();
+      // 1) 외곽 고에너지 플라즈마 글로우 레이저 (두께 8px)
+      ctx.strokeStyle = track.type === 'kinetic'
+        ? `rgba(255, 42, 109, ${0.48 * laserPulse})`
+        : `rgba(0, 255, 157, ${0.48 * laserPulse})`;
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+
+      // 2) 내부 중심 초고휘도 화이트 코어 레이저 (두께 2px)
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+
+      // 3) 레이저를 타고 타겟으로 광속 질주하는 에너지 펄스 파티클
+      const pulseSpeed = (now * 0.0035 + track.id * 0.35) % 1.0;
+      const px = cx + (tx - cx) * pulseSpeed;
+      const py = cy + (ty - cy) * pulseSpeed;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 4) 타겟 충돌 지점 고출력 레이저 임팩트 & 회전 링
+      const rot = now * 0.0045;
+      const impactR = 15 + 4 * Math.sin(now * 0.025);
+
+      ctx.strokeStyle = mainColor;
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.arc(tx, ty, impactR, rot, rot + Math.PI * 0.65);
+      ctx.arc(tx, ty, impactR, rot + Math.PI, rot + Math.PI * 1.65);
+      ctx.stroke();
+
+      // 5) 타겟 정밀 핀포인트 십자선 (Pointing Crosshair)
+      const cLen = impactR + 7;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(tx - cLen, ty); ctx.lineTo(tx + cLen, ty);
+      ctx.moveTo(tx, ty - cLen); ctx.lineTo(tx, ty + cLen);
+      ctx.stroke();
+
+      // 6) 레이저 끝단 지향성 포인터 화살표 (Arrowhead pointing directly at bug)
+      const arrowDist = impactR + 9;
+      const tipX = tx - Math.cos(angle) * (impactR - 2);
+      const tipY = ty - Math.sin(angle) * (impactR - 2);
+      const baseDist = arrowDist + 8;
+      const baseX = tx - Math.cos(angle) * baseDist;
+      const baseY = ty - Math.sin(angle) * baseDist;
+      const perp = angle + Math.PI * 0.5;
+
+      ctx.fillStyle = mainColor;
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(baseX + Math.cos(perp) * 6, baseY + Math.sin(perp) * 6);
+      ctx.lineTo(baseX - Math.cos(perp) * 6, baseY - Math.sin(perp) * 6);
+      ctx.closePath();
+      ctx.fill();
+
+      // 7) 비행 궤적선 (Kinetic 모드)
       if (track.trail.length > 1 && track.type === 'kinetic') {
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.8)';
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
         ctx.lineWidth = 2.2;
         ctx.beginPath();
         ctx.moveTo(track.trail[0].x * w, track.trail[0].y * h);
@@ -1452,43 +1541,23 @@ class ArgonBugScanner {
           ctx.lineTo(track.trail[i].x * w, track.trail[i].y * h);
         }
         ctx.stroke();
-        ctx.restore();
       }
 
-      const r = 24;
-      const mainColor = track.type === 'kinetic' ? '#ff2a6d' : '#00ff9d';
-
-      ctx.save();
-      ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 2;
-
-      const cLen = 9;
-      ctx.beginPath();
-      ctx.moveTo(tx - r, ty - r + cLen); ctx.lineTo(tx - r, ty - r); ctx.lineTo(tx - r + cLen, ty - r);
-      ctx.moveTo(tx + r - cLen, ty - r); ctx.lineTo(tx + r, ty - r); ctx.lineTo(tx + r, ty - r + cLen);
-      ctx.moveTo(tx - r, ty + r - cLen); ctx.lineTo(tx - r, ty + r); ctx.lineTo(tx - r + cLen, ty + r);
-      ctx.moveTo(tx + r - cLen, ty + r); ctx.lineTo(tx + r, ty + r); ctx.lineTo(tx + r, ty + r - cLen);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(tx, ty, 4, 0, Math.PI * 2);
-      ctx.fillStyle = mainColor;
-      ctx.fill();
-
+      // 8) 전술 레이저 락온 텔레메트리 배지
       const label = track.type === 'kinetic'
-        ? `확정 비행체 #${track.id}`
-        : `확정 암점 (대비 +${track.contrast})`;
+        ? `LASER LOCK ⚡ #${track.id} [${Math.round(dist)}px]`
+        : `LASER PINPOINT ⚡ 암점 (대비 +${track.contrast})`;
 
-      ctx.font = '700 11px "Pretendard", sans-serif';
+      ctx.font = '700 11px "JetBrains Mono", sans-serif';
       const tw = ctx.measureText(label).width;
-      ctx.fillStyle = 'rgba(5, 7, 12, 0.85)';
-      ctx.fillRect(tx + r + 6, ty - 11, tw + 12, 20);
+      ctx.fillStyle = 'rgba(5, 7, 12, 0.9)';
+      ctx.fillRect(tx + impactR + 8, ty - 11, tw + 14, 22);
       ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx + r + 6, ty - 11, tw + 12, 20);
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(tx + impactR + 8, ty - 11, tw + 14, 22);
 
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(label, tx + r + 12, ty + 3);
+      ctx.fillText(label, tx + impactR + 15, ty + 4);
       ctx.restore();
     }
 
