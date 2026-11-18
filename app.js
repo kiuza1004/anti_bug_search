@@ -115,6 +115,46 @@ class ArgonBugScanner {
     this.stabilityScore = 100;
     this.cameraHoldingSteadyFrames = 0;
 
+    // -------------------------------------------------------------
+    // 전투기 조종사 HMD 전술 레이저 시스템 (모듈화 설정 아키텍처)
+    // - 버튼을 누를 때만 발사되며, 향후 색상/빔 종류 별도 설정 완벽 지원
+    // -------------------------------------------------------------
+    this.laserConfig = {
+      active: false,        // 버튼 누를 때만 true (평소 화면 청결 유지)
+      color: 'red',         // 'red' | 'green' | 'cyan' | 'violet' (확장 지원)
+      beamStyle: 'twin',    // 'twin' (조종석 양익 트윈 레이저 수렴) | 'center' (중앙 파일런 단일 빔)
+      palettes: {
+        red: {
+          glow: 'rgba(255, 23, 68, 0.55)',
+          main: '#ff1744',
+          core: '#ffffff',
+          spark: '#ff5252',
+          tag: 'RED LASER STRIKE'
+        },
+        green: {
+          glow: 'rgba(0, 255, 157, 0.55)',
+          main: '#00ff9d',
+          core: '#ffffff',
+          spark: '#69f0ae',
+          tag: 'GREEN LASER STRIKE'
+        },
+        cyan: {
+          glow: 'rgba(0, 240, 255, 0.55)',
+          main: '#00f0ff',
+          core: '#ffffff',
+          spark: '#80d8ff',
+          tag: 'CYAN LASER STRIKE'
+        },
+        violet: {
+          glow: 'rgba(168, 85, 247, 0.55)',
+          main: '#a855f7',
+          core: '#ffffff',
+          spark: '#e040fb',
+          tag: 'PLASMA LASER STRIKE'
+        }
+      }
+    };
+
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     this.bindEvents();
@@ -145,6 +185,23 @@ class ArgonBugScanner {
       this.initAudioContext();
       this.toggleScanning(!this.isScanning);
     });
+
+    // [핵심] 전투기 HMD 전술 레이저 발사 버튼 제어 (클릭 토글 & 롱프레스 Hold 겸용)
+    const laserBtn = document.getElementById('laserFireBtn');
+    if (laserBtn) {
+      laserBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.toggleLaser(!this.laserConfig.active);
+      });
+      laserBtn.addEventListener('touchstart', (e) => {
+        e.stopPropagation();
+        this.toggleLaser(true);
+      }, { passive: true });
+      laserBtn.addEventListener('touchend', (e) => {
+        e.stopPropagation();
+        this.toggleLaser(false);
+      }, { passive: true });
+    }
 
     document.querySelectorAll('.mode-card').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -246,6 +303,46 @@ class ArgonBugScanner {
     });
 
     window.addEventListener('resize', () => this.handleResize());
+  }
+
+  // -------------------------------------------------------------
+  // 전투기 HMD 전술 레이저 발사 제어
+  // -------------------------------------------------------------
+  toggleLaser(state) {
+    this.laserConfig.active = !!state;
+    const btn = document.getElementById('laserFireBtn');
+    if (btn) btn.classList.toggle('active', this.laserConfig.active);
+
+    if (this.laserConfig.active) {
+      this.playTacticalLaserSound();
+      if (this.vibrateEnabled && navigator.vibrate) {
+        try { navigator.vibrate(35); } catch (e) {}
+      }
+    }
+  }
+
+  playTacticalLaserSound() {
+    if (!this.soundEnabled) return;
+    this.initAudioContext();
+    if (!this.audioCtx) return;
+
+    try {
+      const now = this.audioCtx.currentTime;
+      const osc = this.audioCtx.createOscillator();
+      const gain = this.audioCtx.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1600, now);
+      osc.frequency.exponentialRampToValueAtTime(340, now + 0.16);
+
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+
+      osc.connect(gain);
+      gain.connect(this.audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.16);
+    } catch (e) {}
   }
 
   resetTrackingBuffers() {
@@ -1476,187 +1573,200 @@ class ArgonBugScanner {
 
     const cx = w * 0.5;
     const cy = h * 0.5;
+    const isLaserFiring = this.laserConfig && this.laserConfig.active;
+    const palette = (this.laserConfig && this.laserConfig.palettes[this.laserConfig.color]) || {
+      glow: 'rgba(255, 23, 68, 0.55)',
+      main: '#ff1744',
+      core: '#ffffff',
+      spark: '#ff5252',
+      tag: 'RED LASER STRIKE'
+    };
 
     // -------------------------------------------------------------
-    // [1단계] 화면 중앙 전술 영점(Zero-Point Laser Emitter) 렌더링
+    // [1단계] 전투기 조종사 헬멧 HMD 중앙 영점 레티클 (Pilot Helmet Sight)
     // -------------------------------------------------------------
     ctx.save();
-    const zeroPulse = 1.0 + 0.15 * Math.sin(now * 0.012);
-    ctx.strokeStyle = 'rgba(255, 23, 68, 0.55)';
-    ctx.lineWidth = 1.8;
+    const reticleColor = isLaserFiring ? palette.main : 'rgba(0, 240, 255, 0.45)';
+    ctx.strokeStyle = reticleColor;
+    ctx.lineWidth = 1.5;
+
+    // 조종사 헬멧 중앙 조준 링
     ctx.beginPath();
-    ctx.arc(cx, cy, 14 * zeroPulse, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 18, 0, Math.PI * 2);
     ctx.stroke();
 
-    // 영점 십자 눈금
-    ctx.strokeStyle = '#ff1744';
-    ctx.lineWidth = 2.0;
+    // 4방향 요(Yaw)/피치(Pitch) HMD 조준 눈금
     ctx.beginPath();
-    ctx.moveTo(cx - 8, cy); ctx.lineTo(cx - 3, cy);
-    ctx.moveTo(cx + 3, cy); ctx.lineTo(cx + 8, cy);
-    ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy - 3);
-    ctx.moveTo(cx, cy + 3); ctx.lineTo(cx, cy + 8);
+    ctx.moveTo(cx - 26, cy); ctx.lineTo(cx - 12, cy);
+    ctx.moveTo(cx + 12, cy); ctx.lineTo(cx + 26, cy);
+    ctx.moveTo(cx, cy - 26); ctx.lineTo(cx, cy - 12);
+    ctx.moveTo(cx, cy + 12); ctx.lineTo(cx, cy + 26);
     ctx.stroke();
 
-    ctx.fillStyle = '#ff1744';
+    ctx.fillStyle = isLaserFiring ? palette.main : '#00f0ff';
     ctx.beginPath();
-    ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
     // -------------------------------------------------------------
-    // [2단계] 타겟 목록 취합 (확정 표적 + 즉시 락온 표적 + 수동 핀포인트)
+    // [2단계] 타겟 목표점 선정 (우선순위: 수동 핀포인트 > 감지 표적 > 실시간 중앙 암점)
     // -------------------------------------------------------------
-    const targetsToRender = [];
+    let target = null;
 
-    // 1순위: 다중 프레임 추적 표적 (단 1프레임 감지되어도 즉시 레이저 발사)
-    for (const track of this.activeTracks) {
-      if (track.hitCount >= 1) {
-        targetsToRender.push({
-          x: track.x * w,
-          y: track.y * h,
-          type: track.type,
-          label: track.type === 'kinetic' ? `TARGET #${track.id}` : `SPOT (대비 +${track.contrast || 20})`,
-          confirmed: track.confirmed,
-          trail: track.trail
-        });
-      }
-    }
-
-    // 2순위: 활성 트랙이 없을 때 화면 중앙 부근에서 실시간 감지된 최적 암점 표적
-    if (targetsToRender.length === 0 && this.instantTarget) {
-      targetsToRender.push({
-        x: this.instantTarget.x * w,
-        y: this.instantTarget.y * h,
-        type: 'spot',
-        label: `LASER AUTO-LOCK (대비 +${Math.round(this.instantTarget.score)})`,
-        confirmed: true,
-        trail: []
-      });
-    }
-
-    // 3순위: 사용자가 터치한 수동 확대 지점
     if (this.pinnedPoint) {
-      targetsToRender.push({
+      target = {
         x: this.pinnedPoint.x * w,
         y: this.pinnedPoint.y * h,
-        type: 'pinned',
-        label: `MANUAL PINPOINT`,
-        confirmed: true,
-        trail: []
-      });
+        label: 'MANUAL LOCK',
+        type: 'pinned'
+      };
+    } else if (this.activeTracks.length > 0) {
+      const best = this.activeTracks[0];
+      target = {
+        x: best.x * w,
+        y: best.y * h,
+        label: best.type === 'kinetic' ? `AIR TGT #${best.id}` : `WALL SPOT (+${best.contrast || 22})`,
+        type: best.type
+      };
+    } else if (this.instantTarget) {
+      target = {
+        x: this.instantTarget.x * w,
+        y: this.instantTarget.y * h,
+        label: `HMD AUTO-TRACK (+${Math.round(this.instantTarget.score)})`,
+        type: 'spot'
+      };
     }
 
     // -------------------------------------------------------------
-    // [3단계] 영점에서 타겟까지 선명하고 두꺼운 실선 레이저 라인 발사 퍼포먼스
+    // [3단계] 레이저 버튼이 꺼져 있을 때: 타겟 주변에 은은한 조준 상자만 표시 (어지러움 제로)
     // -------------------------------------------------------------
-    for (const tgt of targetsToRender) {
-      const tx = tgt.x;
-      const ty = tgt.y;
-      const dist = Math.hypot(tx - cx, ty - cy);
-      const angle = Math.atan2(ty - cy, tx - cx);
+    if (!isLaserFiring) {
+      if (target) {
+        ctx.save();
+        const tr = 18;
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.65)';
+        ctx.lineWidth = 1.6;
+        // 조종사 헬멧 다이아몬드 타겟 박스
+        ctx.beginPath();
+        ctx.moveTo(target.x - tr, target.y);
+        ctx.lineTo(target.x, target.y - tr);
+        ctx.lineTo(target.x + tr, target.y);
+        ctx.lineTo(target.x, target.y + tr);
+        ctx.closePath();
+        ctx.stroke();
 
-      const mainColor = tgt.type === 'pinned' ? '#a855f7' : (tgt.type === 'kinetic' ? '#ff2a6d' : '#ff1744');
-      const laserPulse = 0.9 + 0.1 * Math.sin(now * 0.02);
+        ctx.fillStyle = '#00f0ff';
+        ctx.font = '700 10px "JetBrains Mono", sans-serif';
+        ctx.fillText(`[READY] ${target.label}`, target.x + tr + 6, target.y + 4);
+        ctx.restore();
+      }
+      return;
+    }
 
-      ctx.save();
+    // -------------------------------------------------------------
+    // [4단계] 레이저 버튼 활성화! - 전투기 조종사 헬멧(HMD) 3D 원근 레이저 발사 퍼포먼스
+    // - 내 화면(기체 하단 조종석 양익/중앙 파일런)에서 타겟으로 3D 깊이감을 갖고 뻗어나감!
+    // -------------------------------------------------------------
+    // 타겟이 없으면 화면 중앙 전방을 향해 조사
+    const tx = target ? target.x : cx;
+    const ty = target ? target.y : cy - 80;
+    const targetLabel = target ? target.label : 'BORESIGHT STRIKE';
+    const dist = Math.hypot(tx - cx, ty - cy);
 
-      // (A) 영점에서 타겟까지 선명하게 꽂히는 3중 고에너지 실선 레이저 빔
-      // 1. 외곽 네온 플라즈마 헤일로 빔 (두께 11px)
-      ctx.strokeStyle = tgt.type === 'pinned'
-        ? `rgba(168, 85, 247, ${0.45 * laserPulse})`
-        : `rgba(255, 23, 68, ${0.50 * laserPulse})`;
-      ctx.lineWidth = 11;
+    // 내 화면 하단 양측 (조종사 관점의 좌/우 무장 파일런 원점)
+    const pylons = this.laserConfig.beamStyle === 'center'
+      ? [{ x: w * 0.50, y: h * 1.02 }]
+      : [
+          { x: w * 0.14, y: h * 1.02 }, // 좌측 날개 파일런
+          { x: w * 0.86, y: h * 1.02 }  // 우측 날개 파일런
+        ];
+
+    ctx.save();
+
+    for (const pylon of pylons) {
+      // (A) 원근감 그라디언트 (발사구는 두껍고 타겟으로 갈수록 좁아져 깊이감 형성)
+      const gradGlow = ctx.createLinearGradient(pylon.x, pylon.y, tx, ty);
+      gradGlow.addColorStop(0, palette.glow);
+      gradGlow.addColorStop(0.7, palette.glow);
+      gradGlow.addColorStop(1, 'rgba(255, 255, 255, 0.9)');
+
+      // 1. 외곽 고출력 플라즈마 빔 (두께 14px)
+      ctx.strokeStyle = gradGlow;
+      ctx.lineWidth = 14;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
+      ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 2. 메인 강렬한 고출력 레이저 빔 (두께 4.8px)
-      ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 4.8;
+      // 2. 메인 고출력 레이저 빔 (두께 5.5px)
+      ctx.strokeStyle = palette.main;
+      ctx.lineWidth = 5.5;
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
+      ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 3. 중심 초고휘도 순백색 코어 빔 (두께 1.8px)
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.8;
+      // 3. 중심 초고휘도 백색 코어 광선 (두께 2.0px)
+      ctx.strokeStyle = palette.core;
+      ctx.lineWidth = 2.0;
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
+      ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
-
-      // (B) 타겟 충돌 지점 고출력 레이저 임팩트 핀포인트
-      const rot = now * 0.005;
-      const impactR = 16 + 3 * Math.sin(now * 0.025);
-
-      // 1. 회전하는 타겟팅 락온 링
-      ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.arc(tx, ty, impactR, rot, rot + Math.PI * 0.65);
-      ctx.arc(tx, ty, impactR, rot + Math.PI, rot + Math.PI * 1.65);
-      ctx.stroke();
-
-      // 2. 초정밀 타겟팅 십자선 (Pointing Crosshair)
-      const cLen = impactR + 8;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      ctx.moveTo(tx - cLen, ty); ctx.lineTo(tx + cLen, ty);
-      ctx.moveTo(tx, ty - cLen); ctx.lineTo(tx, ty + cLen);
-      ctx.stroke();
-
-      // 3. 레이저 끝단에서 타겟을 정확히 가리키는 지향성 화살표 (Arrowhead Pointer)
-      const tipDist = impactR - 2;
-      const tipX = tx - Math.cos(angle) * tipDist;
-      const tipY = ty - Math.sin(angle) * tipDist;
-      const baseDist = impactR + 10;
-      const baseX = tx - Math.cos(angle) * baseDist;
-      const baseY = ty - Math.sin(angle) * baseDist;
-      const perp = angle + Math.PI * 0.5;
-
-      ctx.fillStyle = mainColor;
-      ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(baseX + Math.cos(perp) * 6.5, baseY + Math.sin(perp) * 6.5);
-      ctx.lineTo(baseX - Math.cos(perp) * 6.5, baseY - Math.sin(perp) * 6.5);
-      ctx.closePath();
-      ctx.fill();
-
-      // 4. 비행 궤적선 (Kinetic 모드)
-      if (tgt.trail && tgt.trail.length > 1) {
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-        ctx.moveTo(tgt.trail[0].x * w, tgt.trail[0].y * h);
-        for (let i = 1; i < tgt.trail.length; i++) {
-          ctx.lineTo(tgt.trail[i].x * w, tgt.trail[i].y * h);
-        }
-        ctx.stroke();
-      }
-
-      // 5. 전술 레이저 락온 텔레메트리 배지
-      const tagText = `⚡ LASER LOCK ⚡ ${tgt.label} [${Math.round(dist)}px]`;
-      ctx.font = '700 11px "JetBrains Mono", sans-serif';
-      const tw = ctx.measureText(tagText).width;
-      ctx.fillStyle = 'rgba(5, 7, 12, 0.92)';
-      ctx.fillRect(tx + impactR + 8, ty - 12, tw + 14, 23);
-      ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 1.4;
-      ctx.strokeRect(tx + impactR + 8, ty - 12, tw + 14, 23);
-
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(tagText, tx + impactR + 15, ty + 4);
-      ctx.restore();
     }
+
+    // (B) 타겟 충돌 지점 (Fighter Jet HMD Target Strike Impact)
+    const impactR = 18 + 4 * Math.sin(now * 0.03);
+
+    // 1. 타겟 락온 팔각 브래킷 (Helmet HMD Octagon Reticle)
+    ctx.strokeStyle = palette.main;
+    ctx.lineWidth = 2.4;
+    const bLen = 8;
+    ctx.beginPath();
+    // 모서리 4방향 락온 괄호
+    ctx.moveTo(tx - impactR, ty - impactR + bLen); ctx.lineTo(tx - impactR, ty - impactR); ctx.lineTo(tx - impactR + bLen, ty - impactR);
+    ctx.moveTo(tx + impactR - bLen, ty - impactR); ctx.lineTo(tx + impactR, ty - impactR); ctx.lineTo(tx + impactR, ty - impactR + bLen);
+    ctx.moveTo(tx - impactR, ty + impactR - bLen); ctx.lineTo(tx - impactR, ty + impactR); ctx.lineTo(tx - impactR + bLen, ty + impactR);
+    ctx.moveTo(tx + impactR - bLen, ty + impactR); ctx.lineTo(tx + impactR, ty + impactR); ctx.lineTo(tx + impactR, ty + impactR - bLen);
+    ctx.stroke();
+
+    // 2. 타겟 중심 초정밀 충돌 십자선
+    ctx.strokeStyle = palette.core;
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.moveTo(tx - impactR - 6, ty); ctx.lineTo(tx + impactR + 6, ty);
+    ctx.moveTo(tx, ty - impactR - 6); ctx.lineTo(tx, ty + impactR + 6);
+    ctx.stroke();
+
+    // 3. 레이저 직격 플라즈마 코어 스팟
+    ctx.fillStyle = palette.spark;
+    ctx.beginPath();
+    ctx.arc(tx, ty, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(tx, ty, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 4. 전투기 HMD 전술 헤드업 텔레메트리 레이블
+    const hudTag = `⚡ HMD LASER LOCK ⚡ [${targetLabel}]`;
+    ctx.font = '800 11px "JetBrains Mono", sans-serif';
+    const tagW = ctx.measureText(hudTag).width;
+
+    ctx.fillStyle = 'rgba(5, 7, 12, 0.94)';
+    ctx.fillRect(tx - tagW * 0.5 - 8, ty - impactR - 26, tagW + 16, 20);
+    ctx.strokeStyle = palette.main;
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(tx - tagW * 0.5 - 8, ty - impactR - 26, tagW + 16, 20);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(hudTag, tx, ty - impactR - 12);
+    ctx.textAlign = 'start';
+
+    ctx.restore();
 
     if (this.pinnedPoint) {
       const px = this.pinnedPoint.x * w;

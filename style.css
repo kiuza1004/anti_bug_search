@@ -776,8 +776,8 @@ html, body {
 /* 4행: 전술 액션 독 */
 .tactical-dock {
   display: grid;
-  grid-template-columns: 1fr 1fr 1.3fr 1fr 1fr 1fr;
-  gap: 6px;
+  grid-template-columns: 1fr 1fr 1.25fr 1.15fr 1fr 1fr 1fr;
+  gap: 5px;
   align-items: center;
 }
 
@@ -794,6 +794,9 @@ html, body {
   color: var(--ar-text-muted);
   cursor: pointer;
   white-space: nowrap;
+  user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .dock-svg {
@@ -811,6 +814,25 @@ html, body {
   background: rgba(0, 240, 255, 0.12);
   border-color: rgba(0, 240, 255, 0.45);
   color: var(--ar-cyan);
+}
+
+/* 전투기 HMD 전술 레이저 발사 버튼 전용 스타일 */
+.dock-btn.laser-trigger-btn {
+  border-color: rgba(255, 23, 68, 0.4);
+  color: #ff5252;
+}
+
+.dock-btn.laser-trigger-btn.active {
+  background: rgba(255, 23, 68, 0.24) !important;
+  border-color: #ff1744 !important;
+  color: #ff1744 !important;
+  box-shadow: 0 0 16px rgba(255, 23, 68, 0.75);
+  animation: laserPulseGlow 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes laserPulseGlow {
+  0% { box-shadow: 0 0 6px rgba(255, 23, 68, 0.4); }
+  100% { box-shadow: 0 0 20px rgba(255, 23, 68, 0.95); }
 }
 
 .argon-core-btn {
