@@ -154,6 +154,7 @@ class ArgonBugScanner {
         }
       }
     };
+    this.laserPulseTimer = null;
 
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -186,22 +187,68 @@ class ArgonBugScanner {
       this.toggleScanning(!this.isScanning);
     });
 
-    // [핵심] 전투기 HMD 전술 레이저 발사 버튼 제어 (클릭 토글 & 롱프레스 Hold 겸용)
+    // [핵심] 전투기 HMD 전술 레이저 발사 제어
+    // - 누르고 있는 동안만 계속 발사 (Hold-to-Fire)
+    // - 손을 떼는 순간 즉시 정지 (Release-to-Stop)
+    // - 살짝 탭했을 때는 단발성 펄스(280ms) 1회 발사 후 자동 차단
     const laserBtn = document.getElementById('laserFireBtn');
     if (laserBtn) {
-      laserBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.toggleLaser(!this.laserConfig.active);
-      });
+      // 모바일 터치 제어
       laserBtn.addEventListener('touchstart', (e) => {
-        e.stopPropagation();
-        this.toggleLaser(true);
-      }, { passive: true });
+        e.preventDefault();
+        this.startLaser();
+      }, { passive: false });
+
       laserBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        this.stopLaser();
+      }, { passive: false });
+
+      laserBtn.addEventListener('touchcancel', () => {
+        this.stopLaser();
+      });
+
+      // PC 마우스 제어
+      laserBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        this.startLaser();
+      });
+
+      laserBtn.addEventListener('mouseup', () => {
+        this.stopLaser();
+      });
+
+      laserBtn.addEventListener('mouseleave', () => {
+        this.stopLaser();
+      });
+
+      // 단발 탭 클릭 시: 280ms 후 자동 차단
+      laserBtn.addEventListener('click', (e) => {
+        e.preventDefault();
         e.stopPropagation();
-        this.toggleLaser(false);
-      }, { passive: true });
+        this.triggerLaserPulse(280);
+      });
     }
+
+    // 레이저 색상 선택 바
+    document.querySelectorAll('[data-lcolor]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('[data-lcolor]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.setLaserColor(btn.dataset.lcolor);
+      });
+    });
+
+    // 레이저 빔 종류 선택 바
+    document.querySelectorAll('[data-lstyle]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('[data-lstyle]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.setLaserStyle(btn.dataset.lstyle);
+      });
+    });
 
     document.querySelectorAll('.mode-card').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -306,18 +353,55 @@ class ArgonBugScanner {
   }
 
   // -------------------------------------------------------------
-  // 전투기 HMD 전술 레이저 발사 제어
+  // 전투기 HMD 전술 레이저 발사 제어 (Hold-to-Fire & Auto-Stop)
   // -------------------------------------------------------------
-  toggleLaser(state) {
-    this.laserConfig.active = !!state;
+  startLaser() {
+    clearTimeout(this.laserPulseTimer);
+    this.laserConfig.active = true;
     const btn = document.getElementById('laserFireBtn');
-    if (btn) btn.classList.toggle('active', this.laserConfig.active);
+    if (btn) btn.classList.add('active');
 
-    if (this.laserConfig.active) {
-      this.playTacticalLaserSound();
-      if (this.vibrateEnabled && navigator.vibrate) {
-        try { navigator.vibrate(35); } catch (e) {}
-      }
+    this.playTacticalLaserSound();
+    if (this.vibrateEnabled && navigator.vibrate) {
+      try { navigator.vibrate(35); } catch (e) {}
+    }
+  }
+
+  stopLaser() {
+    clearTimeout(this.laserPulseTimer);
+    this.laserConfig.active = false;
+    const btn = document.getElementById('laserFireBtn');
+    if (btn) btn.classList.remove('active');
+  }
+
+  triggerLaserPulse(durationMs = 280) {
+    this.startLaser();
+    this.laserPulseTimer = setTimeout(() => {
+      this.stopLaser();
+    }, durationMs);
+  }
+
+  setLaserColor(colorKey) {
+    if (this.laserConfig.palettes[colorKey]) {
+      this.laserConfig.color = colorKey;
+      try {
+        localStorage.setItem('argon_laser_color', colorKey);
+      } catch (e) {}
+    }
+  }
+
+  setLaserStyle(styleKey) {
+    this.laserConfig.beamStyle = styleKey;
+    try {
+      localStorage.setItem('argon_laser_style', styleKey);
+    } catch (e) {}
+  }
+
+  toggleLaser(state) {
+    if (state) {
+      this.startLaser();
+    } else {
+      this.stopLaser();
     }
   }
 
@@ -1674,13 +1758,22 @@ class ArgonBugScanner {
     const targetLabel = target ? target.label : 'BORESIGHT STRIKE';
     const dist = Math.hypot(tx - cx, ty - cy);
 
-    // 내 화면 하단 양측 (조종사 관점의 좌/우 무장 파일런 원점)
-    const pylons = this.laserConfig.beamStyle === 'center'
-      ? [{ x: w * 0.50, y: h * 1.02 }]
-      : [
-          { x: w * 0.14, y: h * 1.02 }, // 좌측 날개 파일런
-          { x: w * 0.86, y: h * 1.02 }  // 우측 날개 파일런
-        ];
+    // 내 화면 하단 발사 원점 (조종사 헬멧 HMD 3D 원근 빔 원점)
+    let pylons = [];
+    if (this.laserConfig.beamStyle === 'center') {
+      pylons = [{ x: w * 0.50, y: h * 1.02, thick: 20, coreThick: 3.0 }]; // 기수 중앙 대형 캐논
+    } else if (this.laserConfig.beamStyle === 'pulse') {
+      pylons = [
+        { x: w * 0.14, y: h * 1.02, thick: 11, coreThick: 1.8 },
+        { x: w * 0.50, y: h * 1.02, thick: 14, coreThick: 2.2 },
+        { x: w * 0.86, y: h * 1.02, thick: 11, coreThick: 1.8 }
+      ]; // 3포드 고속 펄스 스톰
+    } else {
+      pylons = [
+        { x: w * 0.14, y: h * 1.02, thick: 14, coreThick: 2.0 }, // 좌측 날개 파일런
+        { x: w * 0.86, y: h * 1.02, thick: 14, coreThick: 2.0 }  // 우측 날개 파일런
+      ]; // 양익 트윈 수렴 빔
+    }
 
     ctx.save();
 
@@ -1689,33 +1782,42 @@ class ArgonBugScanner {
       const gradGlow = ctx.createLinearGradient(pylon.x, pylon.y, tx, ty);
       gradGlow.addColorStop(0, palette.glow);
       gradGlow.addColorStop(0.7, palette.glow);
-      gradGlow.addColorStop(1, 'rgba(255, 255, 255, 0.9)');
+      gradGlow.addColorStop(1, 'rgba(255, 255, 255, 0.95)');
 
-      // 1. 외곽 고출력 플라즈마 빔 (두께 14px)
+      // 펄스 스타일일 때 점선 펄스 애니메이션
+      if (this.laserConfig.beamStyle === 'pulse') {
+        ctx.setLineDash([14, 8]);
+        ctx.lineDashOffset = -now * 0.08;
+      } else {
+        ctx.setLineDash([]);
+      }
+
+      // 1. 외곽 고출력 플라즈마 빔
       ctx.strokeStyle = gradGlow;
-      ctx.lineWidth = 14;
+      ctx.lineWidth = pylon.thick;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 2. 메인 고출력 레이저 빔 (두께 5.5px)
+      // 2. 메인 고출력 레이저 빔
       ctx.strokeStyle = palette.main;
-      ctx.lineWidth = 5.5;
+      ctx.lineWidth = pylon.thick * 0.42;
       ctx.beginPath();
       ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 3. 중심 초고휘도 백색 코어 광선 (두께 2.0px)
+      // 3. 중심 초고휘도 백색 코어 광선
       ctx.strokeStyle = palette.core;
-      ctx.lineWidth = 2.0;
+      ctx.lineWidth = pylon.coreThick;
       ctx.beginPath();
       ctx.moveTo(pylon.x, pylon.y);
       ctx.lineTo(tx, ty);
       ctx.stroke();
     }
+    ctx.setLineDash([]);
 
     // (B) 타겟 충돌 지점 (Fighter Jet HMD Target Strike Impact)
     const impactR = 18 + 4 * Math.sin(now * 0.03);

@@ -773,6 +773,77 @@ html, body {
   font-weight: 800;
 }
 
+/* 3.5행: 전투기 HMD 레이저 무장 콘솔 스타일 */
+.laser-config-deck {
+  background: rgba(4, 7, 14, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 4px 6px;
+  margin-top: 1px;
+}
+
+.laser-cfg-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.laser-cfg-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+}
+
+.laser-cfg-title {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ar-text-muted);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.laser-chip-group {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 6px;
+  padding: 1.5px;
+}
+
+.laser-chip {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ar-text-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 3px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--ar-trans);
+}
+
+.laser-chip.active {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.lchip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
 /* 4행: 전술 액션 독 */
 .tactical-dock {
   display: grid;

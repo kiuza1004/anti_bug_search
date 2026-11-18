@@ -213,6 +213,38 @@
         </div>
       </div>
 
+      <!-- 3.5행: 전투기 HMD 레이저 무장 콘솔 (색상 & 빔 종류 실시간 지정) -->
+      <div class="laser-config-deck" id="laserConfigDeck">
+        <div class="laser-cfg-row">
+          <div class="laser-cfg-sub">
+            <span class="laser-cfg-title">광선 색상</span>
+            <div class="laser-chip-group">
+              <button class="laser-chip active" data-lcolor="red" title="레드 고에너지 빔">
+                <span class="lchip-dot" style="background:#ff1744;box-shadow:0 0 5px #ff1744;"></span>레드
+              </button>
+              <button class="laser-chip" data-lcolor="green" title="네온그린 광선">
+                <span class="lchip-dot" style="background:#00ff9d;box-shadow:0 0 5px #00ff9d;"></span>그린
+              </button>
+              <button class="laser-chip" data-lcolor="cyan" title="코발트 시안 광선">
+                <span class="lchip-dot" style="background:#00f0ff;box-shadow:0 0 5px #00f0ff;"></span>시안
+              </button>
+              <button class="laser-chip" data-lcolor="violet" title="플라즈마 바이올렛">
+                <span class="lchip-dot" style="background:#a855f7;box-shadow:0 0 5px #a855f7;"></span>퍼플
+              </button>
+            </div>
+          </div>
+
+          <div class="laser-cfg-sub">
+            <span class="laser-cfg-title">발사 형태</span>
+            <div class="laser-chip-group">
+              <button class="laser-chip active" data-lstyle="twin" title="양익 트윈 수렴 레이저">트윈 빔</button>
+              <button class="laser-chip" data-lstyle="center" title="기수 중앙 직사 캐논">중앙 캐논</button>
+              <button class="laser-chip" data-lstyle="pulse" title="고속 펄스 광선">펄스 빔</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 4행: 전술 액션 독 -->
       <div class="tactical-dock">
         <button id="torchBtn" class="dock-btn" title="플래시 조명 (Torch)">
