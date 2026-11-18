@@ -111,6 +111,7 @@ class ArgonBugScanner {
     this.activeTracks = [];
     this.nextTrackId = 1;
     this.heatmapPoints = [];
+    this.instantTarget = null; // 실시간 영점 레이저 즉각 락온 표적
     this.stabilityScore = 100;
     this.cameraHoldingSteadyFrames = 0;
 
@@ -601,12 +602,73 @@ class ArgonBugScanner {
       this.detectAndTrackMicroSpot(blurGray, edgeMag, isCameraSteady);
     }
 
+    // 3-2단계: 화면 내 최적 표적 실시간 영점 락온 스캐너
+    this.updateInstantLaserTarget(blurGray, edgeMag);
+
     // 4단계: 정밀 돋보기(루페) 포커스 부드럽게 갱신
     this.updateSmoothLoupe();
 
     // 5단계: HUD 및 검증 상태 렌더링
     this.evaluateTacticalAlarm(isCameraSteady);
     this.renderArgonHUD();
+  }
+
+  // -------------------------------------------------------------
+  // 화면 중앙 부근의 가장 유력한 타겟(암점/곤충 후보) 실시간 영점 락온
+  // -------------------------------------------------------------
+  updateInstantLaserTarget(blurGray, edgeMag) {
+    const w = this.procWidth;
+    const h = this.procHeight;
+
+    const startX = Math.floor(w * 0.18);
+    const endX = Math.floor(w * 0.82);
+    const startY = Math.floor(h * 0.18);
+    const endY = Math.floor(h * 0.82);
+
+    let bestX = -1;
+    let bestY = -1;
+    let maxScore = 0;
+
+    const step = 3;
+    for (let y = startY; y < endY; y += step) {
+      const row = y * w;
+      for (let x = startX; x < endX; x += step) {
+        const cLum = blurGray[row + x];
+        // 4방향 국소 대비(Δ Contrast)
+        const l = blurGray[row + x - 3];
+        const r = blurGray[row + x + 3];
+        const u = blurGray[(y - 3) * w + x];
+        const d = blurGray[(y + 3) * w + x];
+        const avgSurround = (l + r + u + d) * 0.25;
+        const delta = avgSurround - cLum;
+
+        // 고립 암점이며 가장자리 선이 아닌 경우
+        if (delta > 14 && edgeMag[row + x] < delta * 1.2) {
+          const distToCenter = Math.hypot(x / w - 0.5, y / h - 0.5);
+          const score = delta * (1.2 - distToCenter);
+          if (score > maxScore) {
+            maxScore = score;
+            bestX = x;
+            bestY = y;
+          }
+        }
+      }
+    }
+
+    if (bestX > 0 && maxScore > 16) {
+      const targetNx = bestX / w;
+      const targetNy = bestY / h;
+      if (!this.instantTarget) {
+        this.instantTarget = { x: targetNx, y: targetNy, score: maxScore };
+      } else {
+        // 급격한 튐 방지 부드러운 위치 추종
+        this.instantTarget.x = this.instantTarget.x * 0.7 + targetNx * 0.3;
+        this.instantTarget.y = this.instantTarget.y * 0.7 + targetNy * 0.3;
+        this.instantTarget.score = maxScore;
+      }
+    } else {
+      this.instantTarget = null;
+    }
   }
 
   // -------------------------------------------------------------
@@ -1415,110 +1477,148 @@ class ArgonBugScanner {
     const cx = w * 0.5;
     const cy = h * 0.5;
 
-    for (const track of this.activeTracks) {
-      if (track.hitCount < 4) continue;
+    // -------------------------------------------------------------
+    // [1단계] 화면 중앙 전술 영점(Zero-Point Laser Emitter) 렌더링
+    // -------------------------------------------------------------
+    ctx.save();
+    const zeroPulse = 1.0 + 0.15 * Math.sin(now * 0.012);
+    ctx.strokeStyle = 'rgba(255, 23, 68, 0.55)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 14 * zeroPulse, 0, Math.PI * 2);
+    ctx.stroke();
 
-      const tx = track.x * w;
-      const ty = track.y * h;
+    // 영점 십자 눈금
+    ctx.strokeStyle = '#ff1744';
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.moveTo(cx - 8, cy); ctx.lineTo(cx - 3, cy);
+    ctx.moveTo(cx + 3, cy); ctx.lineTo(cx + 8, cy);
+    ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy - 3);
+    ctx.moveTo(cx, cy + 3); ctx.lineTo(cx, cy + 8);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ff1744';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // -------------------------------------------------------------
+    // [2단계] 타겟 목록 취합 (확정 표적 + 즉시 락온 표적 + 수동 핀포인트)
+    // -------------------------------------------------------------
+    const targetsToRender = [];
+
+    // 1순위: 다중 프레임 추적 표적 (단 1프레임 감지되어도 즉시 레이저 발사)
+    for (const track of this.activeTracks) {
+      if (track.hitCount >= 1) {
+        targetsToRender.push({
+          x: track.x * w,
+          y: track.y * h,
+          type: track.type,
+          label: track.type === 'kinetic' ? `TARGET #${track.id}` : `SPOT (대비 +${track.contrast || 20})`,
+          confirmed: track.confirmed,
+          trail: track.trail
+        });
+      }
+    }
+
+    // 2순위: 활성 트랙이 없을 때 화면 중앙 부근에서 실시간 감지된 최적 암점 표적
+    if (targetsToRender.length === 0 && this.instantTarget) {
+      targetsToRender.push({
+        x: this.instantTarget.x * w,
+        y: this.instantTarget.y * h,
+        type: 'spot',
+        label: `LASER AUTO-LOCK (대비 +${Math.round(this.instantTarget.score)})`,
+        confirmed: true,
+        trail: []
+      });
+    }
+
+    // 3순위: 사용자가 터치한 수동 확대 지점
+    if (this.pinnedPoint) {
+      targetsToRender.push({
+        x: this.pinnedPoint.x * w,
+        y: this.pinnedPoint.y * h,
+        type: 'pinned',
+        label: `MANUAL PINPOINT`,
+        confirmed: true,
+        trail: []
+      });
+    }
+
+    // -------------------------------------------------------------
+    // [3단계] 영점에서 타겟까지 선명하고 두꺼운 실선 레이저 라인 발사 퍼포먼스
+    // -------------------------------------------------------------
+    for (const tgt of targetsToRender) {
+      const tx = tgt.x;
+      const ty = tgt.y;
       const dist = Math.hypot(tx - cx, ty - cy);
       const angle = Math.atan2(ty - cy, tx - cx);
 
-      if (!track.confirmed) {
-        const radius = 18;
-        const progress = track.verificationProgress;
-
-        // 1. 전술 조준선에서 표적으로 뻗어나가는 청록색 스캔 유도 레이저 (점선 빔)
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.45)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 5]);
-        ctx.lineDashOffset = -now * 0.025;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
-
-        // 2. 표적 위치 검증 링
-        ctx.strokeStyle = 'rgba(0, 240, 255, 0.3)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.arc(tx, ty, radius, 0, Math.PI * 2);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#00f0ff';
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-        ctx.arc(tx, ty, radius, -Math.PI * 0.5, -Math.PI * 0.5 + Math.PI * 2 * progress);
-        ctx.stroke();
-
-        ctx.fillStyle = '#00f0ff';
-        ctx.font = '600 10px "JetBrains Mono", sans-serif';
-        ctx.fillText(`스캔 레이저 ${Math.round(progress * 100)}%`, tx + radius + 6, ty + 3);
-        ctx.restore();
-        continue;
-      }
-
-      // -------------------------------------------------------------
-      // [핵심] 조준된 대상을 향해 레이저를 쏘며 강렬하게 지목하는 전술 퍼포먼스
-      // -------------------------------------------------------------
-      const mainColor = track.type === 'kinetic' ? '#ff2a6d' : '#00ff9d';
-      const laserPulse = 0.85 + 0.15 * Math.sin(now * 0.018 + track.id);
+      const mainColor = tgt.type === 'pinned' ? '#a855f7' : (tgt.type === 'kinetic' ? '#ff2a6d' : '#ff1744');
+      const laserPulse = 0.9 + 0.1 * Math.sin(now * 0.02);
 
       ctx.save();
-      // 1) 외곽 고에너지 플라즈마 글로우 레이저 (두께 8px)
-      ctx.strokeStyle = track.type === 'kinetic'
-        ? `rgba(255, 42, 109, ${0.48 * laserPulse})`
-        : `rgba(0, 255, 157, ${0.48 * laserPulse})`;
-      ctx.lineWidth = 8;
+
+      // (A) 영점에서 타겟까지 선명하게 꽂히는 3중 고에너지 실선 레이저 빔
+      // 1. 외곽 네온 플라즈마 헤일로 빔 (두께 11px)
+      ctx.strokeStyle = tgt.type === 'pinned'
+        ? `rgba(168, 85, 247, ${0.45 * laserPulse})`
+        : `rgba(255, 23, 68, ${0.50 * laserPulse})`;
+      ctx.lineWidth = 11;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 2) 내부 중심 초고휘도 화이트 코어 레이저 (두께 2px)
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2.0;
+      // 2. 메인 강렬한 고출력 레이저 빔 (두께 4.8px)
+      ctx.strokeStyle = mainColor;
+      ctx.lineWidth = 4.8;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
       ctx.lineTo(tx, ty);
       ctx.stroke();
 
-      // 3) 레이저를 타고 타겟으로 광속 질주하는 에너지 펄스 파티클
-      const pulseSpeed = (now * 0.0035 + track.id * 0.35) % 1.0;
-      const px = cx + (tx - cx) * pulseSpeed;
-      const py = cy + (ty - cy) * pulseSpeed;
-      ctx.fillStyle = '#ffffff';
+      // 3. 중심 초고휘도 순백색 코어 빔 (두께 1.8px)
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.8;
       ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
 
-      // 4) 타겟 충돌 지점 고출력 레이저 임팩트 & 회전 링
-      const rot = now * 0.0045;
-      const impactR = 15 + 4 * Math.sin(now * 0.025);
+      // (B) 타겟 충돌 지점 고출력 레이저 임팩트 핀포인트
+      const rot = now * 0.005;
+      const impactR = 16 + 3 * Math.sin(now * 0.025);
 
+      // 1. 회전하는 타겟팅 락온 링
       ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 2.0;
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
       ctx.arc(tx, ty, impactR, rot, rot + Math.PI * 0.65);
       ctx.arc(tx, ty, impactR, rot + Math.PI, rot + Math.PI * 1.65);
       ctx.stroke();
 
-      // 5) 타겟 정밀 핀포인트 십자선 (Pointing Crosshair)
-      const cLen = impactR + 7;
+      // 2. 초정밀 타겟팅 십자선 (Pointing Crosshair)
+      const cLen = impactR + 8;
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.8;
       ctx.beginPath();
       ctx.moveTo(tx - cLen, ty); ctx.lineTo(tx + cLen, ty);
       ctx.moveTo(tx, ty - cLen); ctx.lineTo(tx, ty + cLen);
       ctx.stroke();
 
-      // 6) 레이저 끝단 지향성 포인터 화살표 (Arrowhead pointing directly at bug)
-      const arrowDist = impactR + 9;
-      const tipX = tx - Math.cos(angle) * (impactR - 2);
-      const tipY = ty - Math.sin(angle) * (impactR - 2);
-      const baseDist = arrowDist + 8;
+      // 3. 레이저 끝단에서 타겟을 정확히 가리키는 지향성 화살표 (Arrowhead Pointer)
+      const tipDist = impactR - 2;
+      const tipX = tx - Math.cos(angle) * tipDist;
+      const tipY = ty - Math.sin(angle) * tipDist;
+      const baseDist = impactR + 10;
       const baseX = tx - Math.cos(angle) * baseDist;
       const baseY = ty - Math.sin(angle) * baseDist;
       const perp = angle + Math.PI * 0.5;
@@ -1526,38 +1626,35 @@ class ArgonBugScanner {
       ctx.fillStyle = mainColor;
       ctx.beginPath();
       ctx.moveTo(tipX, tipY);
-      ctx.lineTo(baseX + Math.cos(perp) * 6, baseY + Math.sin(perp) * 6);
-      ctx.lineTo(baseX - Math.cos(perp) * 6, baseY - Math.sin(perp) * 6);
+      ctx.lineTo(baseX + Math.cos(perp) * 6.5, baseY + Math.sin(perp) * 6.5);
+      ctx.lineTo(baseX - Math.cos(perp) * 6.5, baseY - Math.sin(perp) * 6.5);
       ctx.closePath();
       ctx.fill();
 
-      // 7) 비행 궤적선 (Kinetic 모드)
-      if (track.trail.length > 1 && track.type === 'kinetic') {
+      // 4. 비행 궤적선 (Kinetic 모드)
+      if (tgt.trail && tgt.trail.length > 1) {
         ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
         ctx.lineWidth = 2.2;
         ctx.beginPath();
-        ctx.moveTo(track.trail[0].x * w, track.trail[0].y * h);
-        for (let i = 1; i < track.trail.length; i++) {
-          ctx.lineTo(track.trail[i].x * w, track.trail[i].y * h);
+        ctx.moveTo(tgt.trail[0].x * w, tgt.trail[0].y * h);
+        for (let i = 1; i < tgt.trail.length; i++) {
+          ctx.lineTo(tgt.trail[i].x * w, tgt.trail[i].y * h);
         }
         ctx.stroke();
       }
 
-      // 8) 전술 레이저 락온 텔레메트리 배지
-      const label = track.type === 'kinetic'
-        ? `LASER LOCK ⚡ #${track.id} [${Math.round(dist)}px]`
-        : `LASER PINPOINT ⚡ 암점 (대비 +${track.contrast})`;
-
+      // 5. 전술 레이저 락온 텔레메트리 배지
+      const tagText = `⚡ LASER LOCK ⚡ ${tgt.label} [${Math.round(dist)}px]`;
       ctx.font = '700 11px "JetBrains Mono", sans-serif';
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = 'rgba(5, 7, 12, 0.9)';
-      ctx.fillRect(tx + impactR + 8, ty - 11, tw + 14, 22);
+      const tw = ctx.measureText(tagText).width;
+      ctx.fillStyle = 'rgba(5, 7, 12, 0.92)';
+      ctx.fillRect(tx + impactR + 8, ty - 12, tw + 14, 23);
       ctx.strokeStyle = mainColor;
-      ctx.lineWidth = 1.2;
-      ctx.strokeRect(tx + impactR + 8, ty - 11, tw + 14, 22);
+      ctx.lineWidth = 1.4;
+      ctx.strokeRect(tx + impactR + 8, ty - 12, tw + 14, 23);
 
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(label, tx + impactR + 15, ty + 4);
+      ctx.fillText(tagText, tx + impactR + 15, ty + 4);
       ctx.restore();
     }
 
