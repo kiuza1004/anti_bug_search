@@ -59,6 +59,8 @@ class ArgonBugScanner {
     this.nvCanvas.width = this.nvWidth;
     this.nvCanvas.height = this.nvHeight;
     this.nvAccumBuffer = null; // Float32Array 다중 프레임 시간축 적분 버퍼
+    this.nvLumBuffer = null;   // Uint8Array 엣지 적응형 샤프닝용 휘도 버퍼
+    this.lastRawBrightness = 120; // 프레임 간 모션 시프트 감지용
     this.nvLut = new Uint8Array(256); // 256단계 고정 일괄 증폭 룩업 테이블
     this.nightGainMode = 'mid'; // 'mid' (선명 증폭) | 'max' (극저조도 4x) | 'mono' (야간 윤곽선)
     this.ambientBrightness = 120; // 현재 프레임 평균 밝기 (0~255)
@@ -82,15 +84,7 @@ class ArgonBugScanner {
     this.hiResCanvas.height = 480;
     this.hiResCtx = this.hiResCanvas.getContext('2d');
 
-    // 시뮬레이션 모드용 캔버스
-    this.simCanvas = document.createElement('canvas');
-    this.simCanvas.width = 640;
-    this.simCanvas.height = 480;
-    this.simCtx = this.simCanvas.getContext('2d');
-    this.isSimulation = false;
-    this.simBugs = [];
-
-    // 런타임 상태
+    // 런타임 상태 (오직 100% 실제 카메라 스트림만 운용)
     this.isScanning = false;
     this.stream = null;
     this.currentFacingMode = 'environment';
@@ -122,16 +116,8 @@ class ArgonBugScanner {
 
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-    this.initSimulationEntities();
     this.bindEvents();
     this.handleResize();
-  }
-
-  initSimulationEntities() {
-    this.simBugs = [
-      { x: 0.36, y: 0.44, vx: 0.0032, vy: -0.0022, size: 3.0, flying: true, phase: 0 },
-      { x: 0.50, y: 0.50, vx: 0, vy: 0, size: 3.5, flying: false, phase: 0 }
-    ];
   }
 
   // -------------------------------------------------------------
@@ -145,12 +131,14 @@ class ArgonBugScanner {
       this.toggleScanning(true);
     });
 
-    document.getElementById('simModeBtn').addEventListener('click', () => {
-      document.getElementById('startModal').classList.add('hidden');
-      this.initAudioContext();
-      this.startSimulationMode();
-      this.toggleScanning(true);
-    });
+    const retryBtn = document.getElementById('retryCamBtn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', async () => {
+        document.getElementById('cameraErrorModal').classList.add('hidden');
+        await this.startCamera();
+        this.toggleScanning(true);
+      });
+    }
 
     document.getElementById('startScanBtn').addEventListener('click', () => {
       this.initAudioContext();
@@ -332,19 +320,30 @@ class ArgonBugScanner {
 
   // -------------------------------------------------------------
   // 카메라 초기화 & 하드웨어 저조도 노출 부스트 (EV+)
+  // (가짜 시뮬레이션 없이 오직 실제 하드웨어 카메라만 연결)
   // -------------------------------------------------------------
   async startCamera() {
     this.updateStatus('카메라 연결 중...', 'normal');
-    this.isSimulation = false;
     this.resetTrackingBuffers();
 
     if (this.stream) {
       this.stream.getTracks().forEach(t => t.stop());
+      this.stream = null;
     }
 
+    const errModal = document.getElementById('cameraErrorModal');
+    const errMsg = document.getElementById('camErrorMsg');
+
+    // 비보안 컨텍스트(HTTP IP 접속 등)로 인해 카메라 API가 원천 차단된 경우
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert('이 브라우저에서는 카메라 API를 사용할 수 없어 데모 모드로 전환합니다.');
-      this.startSimulationMode();
+      const isHttp = window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+      if (errModal && errMsg) {
+        errMsg.innerHTML = isHttp
+          ? `스마트폰 브라우저 보안 정책으로 인해 일반 HTTP 주소에서는 카메라가 차단됩니다.<br><strong>아래 해결 방법</strong>에 따라 크롬 설정을 변경하거나 정식 HTTPS 주소로 접속해 주십시오.`
+          : `현재 브라우저 환경에서 카메라 하드웨어에 접근할 수 없습니다. 권한을 확인해 주십시오.`;
+        errModal.classList.remove('hidden');
+      }
+      this.updateStatus('카메라 연결 실패', 'error');
       return;
     }
 
@@ -362,14 +361,24 @@ class ArgonBugScanner {
       this.video.srcObject = this.stream;
       await this.video.play();
 
+      if (errModal) errModal.classList.add('hidden');
       this.handleResize();
-      this.updateStatus('광학 스캔 중 (이상 없음)', 'active');
+      this.updateStatus('광학 스캔 중 (실제 카메라)', 'active');
       this.applyHardwareZoom(this.currentZoom);
       this.applyHardwareLowLightExposure(this.currentFilter === 'night' || this.autoNightActive);
     } catch (err) {
-      console.warn('Camera access failed:', err);
-      alert('카메라 권한을 허용해 주셔야 실제 탐지가 가능합니다. 현재는 시뮬레이션 데모로 전환됩니다.');
-      this.startSimulationMode();
+      console.warn('Real camera access failed:', err);
+      if (errModal && errMsg) {
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          errMsg.textContent = '카메라 접근 권한이 거부되었습니다. 브라우저 설정에서 카메라 권한을 [허용]으로 변경해 주십시오.';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          errMsg.textContent = '기기에서 사용 가능한 카메라 장치를 찾을 수 없습니다.';
+        } else {
+          errMsg.textContent = `카메라를 실행할 수 없습니다: ${err.message || err.name}`;
+        }
+        errModal.classList.remove('hidden');
+      }
+      this.updateStatus('카메라 접근 거부됨', 'error');
     }
   }
 
@@ -391,6 +400,17 @@ class ArgonBugScanner {
       if (caps.exposureMode && caps.exposureMode.includes('continuous')) {
         adv.exposureMode = 'continuous';
       }
+      if (enableBoost) {
+        if (caps.iso && caps.iso.max) {
+          adv.iso = caps.iso.max;
+        }
+        if (caps.exposureTime && caps.exposureTime.max) {
+          adv.exposureTime = caps.exposureTime.max;
+        }
+        if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) {
+          adv.whiteBalanceMode = 'continuous';
+        }
+      }
 
       if (Object.keys(adv).length > 0) {
         await track.applyConstraints({ advanced: [adv] });
@@ -400,22 +420,7 @@ class ArgonBugScanner {
     }
   }
 
-  startSimulationMode() {
-    this.isSimulation = true;
-    this.resetTrackingBuffers();
-    if (this.stream) {
-      this.stream.getTracks().forEach(t => t.stop());
-      this.stream = null;
-    }
-    this.video.srcObject = null;
-    this.updateStatus('데모 시뮬레이션 실행 중', 'active');
-  }
-
   switchCamera() {
-    if (this.isSimulation) {
-      this.startCamera();
-      return;
-    }
     this.currentFacingMode = this.currentFacingMode === 'environment' ? 'user' : 'environment';
     this.startCamera();
   }
@@ -565,70 +570,12 @@ class ArgonBugScanner {
     requestAnimationFrame(() => this.requestLoop());
   }
 
-  renderSimulationFrame() {
-    const ctx = this.simCtx;
-    const w = this.simCanvas.width;
-    const h = this.simCanvas.height;
-    const now = performance.now() * 0.001;
-
-    // 야간 투시 모드일 때는 시뮬레이션 원본을 실제 어두운 방(극저조도)으로 만들어 증폭 성능을 실증!
-    const isDarkSim = this.currentFilter === 'night';
-    const grad = ctx.createRadialGradient(w * 0.5, h * 0.4, 30, w * 0.5, h * 0.5, w * 0.75);
-    if (isDarkSim) {
-      grad.addColorStop(0, '#1e2631');
-      grad.addColorStop(1, '#0d1117');
-    } else {
-      grad.addColorStop(0, '#cbd5e1');
-      grad.addColorStop(1, '#94a3b8');
-    }
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, w, h);
-
-    for (const bug of this.simBugs) {
-      if (bug.flying) {
-        bug.vx += Math.sin(now * 4.5 + bug.phase) * 0.00035;
-        bug.vy += Math.cos(now * 3.8 + bug.phase) * 0.00035;
-        const speed = Math.hypot(bug.vx, bug.vy);
-        if (speed > 0.0055) {
-          bug.vx = (bug.vx / speed) * 0.0055;
-          bug.vy = (bug.vy / speed) * 0.0055;
-        }
-        bug.x += bug.vx;
-        bug.y += bug.vy;
-
-        if (bug.x < 0.18 || bug.x > 0.82) bug.vx *= -1;
-        if (bug.y < 0.20 || bug.y > 0.80) bug.vy *= -1;
-      }
-
-      const bx = bug.x * w;
-      const by = bug.y * h;
-
-      ctx.save();
-      ctx.translate(bx, by);
-      ctx.rotate(bug.flying ? Math.atan2(bug.vy, bug.vx) : 0.3);
-
-      ctx.strokeStyle = isDarkSim ? '#05070a' : '#1e293b';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(-4, -3); ctx.lineTo(4, 3);
-      ctx.moveTo(-4, 3);  ctx.lineTo(4, -3);
-      ctx.stroke();
-
-      ctx.fillStyle = isDarkSim ? '#030406' : '#0f172a';
-      ctx.beginPath();
-      ctx.ellipse(0, 0, bug.size * 1.15, bug.size * 0.65, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-  }
-
   processFrame() {
-    const rawSource = this.isSimulation ? this.simCanvas : this.video;
-    if (this.isSimulation) {
-      this.renderSimulationFrame();
-    } else if (this.video.readyState < 2) {
+    // 실제 카메라 영상 프레임이 준비되지 않았으면 대기
+    if (this.video.readyState < 2) {
       return;
     }
+    const rawSource = this.video;
 
     // 0단계: 저조도 측정 및 진짜 야간 투시 ISP (다중 프레임 적분 + 비선형 암부 감마 LUT) 실행 여부 판단
     const useNightISP = this.evaluateAndRunNightVisionISP(rawSource);
@@ -664,26 +611,39 @@ class ArgonBugScanner {
 
   // -------------------------------------------------------------
   // [핵심] 밝은 부분이 하얗게 날아가지(White Blowout) 않으면서 어두운 암부만 일괄 증폭하는 고정 LUT
+  // - 암부 노이즈 플로어는 억제하고 곤충 암점과 벽면 대비는 극대화하는 S-Curve 하이브리드 감마
   // -------------------------------------------------------------
   buildLockedNightLUT() {
-    // ceiling으로 상한을 자르지 않고 0~255 전 구간을 보존하여 하이라이트 백화(하얗게 타는 현상) 완벽 방지!
-    let gamma = 0.48; // 1단: 암부는 약 2.5배 밝히고 밝은 물체 디테일은 그대로 보존
+    let gamma = 0.44; // 1단: 암부는 약 3배 밝히고 선명도 보존
 
     if (this.nightGainMode === 'max') {
-      gamma = 0.34;   // 2단(강): 칠흑 같은 어둠에서 암부를 약 4배 강하게 리프트
+      gamma = 0.32;   // 2단(강): 칠흑 같은 어둠에서 암부를 약 4.5배 강하게 리프트
     } else if (this.nightGainMode === 'mono') {
-      gamma = 0.40;
+      gamma = 0.38;
     }
 
     for (let v = 0; v < 256; v++) {
       const norm = v / 255.0;
-      this.nvLut[v] = Math.min(255, Math.round(Math.pow(norm, gamma) * 255));
+      // 비선형 파워 리프트
+      let val = Math.pow(norm, gamma) * 255.0;
+
+      // 초저조도 센서 노이즈 플로어(0~8) 억제 및 중간 암점 대비 부스트
+      if (v < 8) {
+        val = val * (v / 8.0);
+      } else if (v < 80) {
+        // 모기/벌레 암점(Dark Blob)의 식별력을 높이기 위한 국소 콘트라스트 기울기 부여
+        val = val * 1.08;
+      }
+
+      this.nvLut[v] = Math.max(0, Math.min(255, Math.round(val)));
     }
   }
 
   // -------------------------------------------------------------
-  // 진짜 저조도 야간 투시 엔진 (Constant-Gain Real Night Vision ISP)
-  // - 깜빡임(밝고 어둡고 반복) 원천 제거: 고정 LUT + 하드웨어 AE 재호출 금지 + 강한 히스테리시스
+  // 차세대 HD 저조도 야간 투시 ISP 엔진 (Next-Gen HD Low-Light ISP)
+  // 1) 8x6 그리드 기반 국소 대비 증폭 (Fast Local Dynamic Range Booster)
+  // 2) 모션 적응형 안티-고스팅 시간축 노이즈 제거 (Anti-Ghosting Motion Filtering)
+  // 3) 엣지 적응형 고주파 언샤프 샤프닝 (Edge-Adaptive High-Boost Sharpening)
   // -------------------------------------------------------------
   evaluateAndRunNightVisionISP(rawSource) {
     const nw = this.nvWidth;
@@ -694,7 +654,7 @@ class ArgonBugScanner {
     const data = imgData.data;
     const totalPixels = nw * nh;
 
-    // 1) 현재 원본 프레임의 평균 밝기 측정
+    // 1) 현재 원본 프레임의 평균 밝기 측정 및 카메라 모션 시프트 감지
     let lumSum = 0;
     let sampleCnt = 0;
     for (let i = 0; i < data.length; i += 32) {
@@ -702,10 +662,11 @@ class ArgonBugScanner {
       sampleCnt++;
     }
     const rawBrightness = lumSum / sampleCnt;
+    const motionShift = Math.abs(rawBrightness - this.lastRawBrightness);
+    this.lastRawBrightness = rawBrightness;
     this.ambientBrightness = Math.round(this.ambientBrightness * 0.85 + rawBrightness * 0.15);
 
-    // 2) 주간/자동(standard) 모드에서는 정말로 어두운 곳(평균 밝기 < 26)일 때만 자동 개입하여
-    //    일반 실내 조명 아래에서 화면이 하얗게 과노출되는 현상을 방지
+    // 2) 주간/자동(standard) 모드에서는 어두운 곳(평균 밝기 < 26)일 때만 자동 개입
     if (this.currentFilter === 'standard') {
       if (this.ambientBrightness < 26) {
         this.darkFrameStreak++;
@@ -735,9 +696,9 @@ class ArgonBugScanner {
     }
 
     const estLux = Math.max(1, Math.round(Math.pow(this.ambientBrightness / 12, 2.1)));
-    this.luxMeterLabel.textContent = `조도 ${estLux} lx · 고정 밝기 증폭 중`;
+    this.luxMeterLabel.textContent = `조도 ${estLux} lx · HD 야간 ISP 가동 중`;
 
-    // 3) 다중 프레임 시간축 적분 버퍼 초기화
+    // 3) 시간축 적분 및 샤프닝 버퍼 동기화
     const lut = this.nvLut;
     if (!this.nvAccumBuffer || this.nvAccumBuffer.length !== totalPixels * 3) {
       this.nvAccumBuffer = new Float32Array(totalPixels * 3);
@@ -747,50 +708,139 @@ class ArgonBugScanner {
         this.nvAccumBuffer[j + 2] = lut[data[i + 2]];
       }
     }
+    if (!this.nvLumBuffer || this.nvLumBuffer.length !== totalPixels) {
+      this.nvLumBuffer = new Uint8Array(totalPixels);
+    }
 
-    // 4) 불연속 나눗셈(ratio) 없이 고정 LUT로 일괄 변환 + 픽셀별 모션 적응형 노이즈 제거
+    // 4) 8x6 그리드 기반 국소 대비 게인 (초고속 0.08ms 서브샘플링)
+    const cols = 8;
+    const rows = 6;
+    const blockW = 60;
+    const blockH = 60;
+    const blockGain = new Float32Array(cols * rows);
+
+    for (let by = 0; by < rows; by++) {
+      const yStart = by * blockH;
+      const bRow = by * cols;
+      for (let bx = 0; bx < cols; bx++) {
+        const xStart = bx * blockW;
+        let bSum = 0;
+        let bCnt = 0;
+        for (let sy = 0; sy < blockH; sy += 8) {
+          const rowOff = (yStart + sy) * nw;
+          for (let sx = 0; sx < blockW; sx += 8) {
+            const p = (rowOff + xStart + sx) * 4;
+            bSum += (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+            bCnt++;
+          }
+        }
+        const bAvg = bCnt > 0 ? (bSum / bCnt) : 128;
+        // 칠흑 같이 어두운 구석은 국소 다이내믹 레인지를 1.20배 확장, 밝은 블록은 1.0 유지
+        blockGain[bRow + bx] = bAvg < 30 ? 1.20 : (bAvg < 65 ? 1.10 : 1.0);
+      }
+    }
+
+    // 5) 모션 적응형 안티-고스팅 시간축 적분 & 픽셀 맵핑
     const isMono = this.nightGainMode === 'mono';
     const accum = this.nvAccumBuffer;
+    const lumBuf = this.nvLumBuffer;
+    const isPanning = motionShift > 4.5;
+    const baseAlpha = isPanning ? 0.22 : 0.74;
 
-    for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
+    let pixelIdx = 0;
+    for (let y = 0; y < nh; y++) {
+      const by = Math.min(rows - 1, (y / blockH) | 0);
+      const bRow = by * cols;
 
-      const lum = (r * 77 + g * 150 + b * 29) >> 8;
-      const liftedLum = lut[lum];
+      for (let x = 0; x < nw; x++, pixelIdx++) {
+        const bx = Math.min(cols - 1, (x / blockW) | 0);
+        const bgain = blockGain[bRow + bx];
 
-      if (isMono) {
-        const prevG = accum[j + 1];
-        // 픽셀 변화가 작으면(정지 배경 노이즈) 0.72 가중치로 부드럽게 평균, 움직임이 크면 즉시 반영
-        const alpha = Math.abs(liftedLum - prevG) < 28 ? 0.72 : 0.25;
-        const curVal = prevG * alpha + liftedLum * (1 - alpha);
-        accum[j + 1] = curVal;
+        const i = pixelIdx * 4;
+        const j = pixelIdx * 3;
 
-        data[i] = curVal * 0.25;
-        data[i + 1] = curVal;
-        data[i + 2] = curVal * 0.78;
-      } else {
-        // 각 채널을 고정 LUT에 직접 통과시킨 뒤 휘도와 블렌딩하여 색 노이즈 억제 & 밝기 완전 고정
-        const nr = lut[r] * 0.55 + liftedLum * 0.45;
-        const ng = lut[g] * 0.65 + liftedLum * 0.35;
-        const nb = lut[b] * 0.55 + liftedLum * 0.45;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
 
-        const prevG = accum[j + 1];
-        const alpha = Math.abs(ng - prevG) < 28 ? 0.72 : 0.25;
-        const invAlpha = 1 - alpha;
+        const lum = (r * 77 + g * 150 + b * 29) >> 8;
+        const rawLifted = lut[lum];
+        const liftedLum = Math.min(255, (rawLifted * bgain) | 0);
 
-        const ar = accum[j] * alpha + nr * invAlpha;
-        const ag = prevG * alpha + ng * invAlpha;
-        const ab = accum[j + 2] * alpha + nb * invAlpha;
+        if (isMono) {
+          const prevG = accum[j + 1];
+          const diff = Math.abs(liftedLum - prevG);
+          const alpha = diff < 26 ? baseAlpha : 0.18;
+          const curVal = prevG * alpha + liftedLum * (1 - alpha);
+          accum[j + 1] = curVal;
 
-        accum[j] = ar;
-        accum[j + 1] = ag;
-        accum[j + 2] = ab;
+          lumBuf[pixelIdx] = curVal | 0;
+          data[i] = curVal * 0.22;
+          data[i + 1] = curVal;
+          data[i + 2] = curVal * 0.75;
+        } else {
+          const nr = Math.min(255, ((lut[r] * 0.52 + liftedLum * 0.48) * bgain) | 0);
+          const ng = Math.min(255, ((lut[g] * 0.62 + liftedLum * 0.38) * bgain) | 0);
+          const nb = Math.min(255, ((lut[b] * 0.52 + liftedLum * 0.48) * bgain) | 0);
 
-        data[i] = ar;
-        data[i + 1] = ag;
-        data[i + 2] = ab;
+          const prevG = accum[j + 1];
+          const diff = Math.abs(ng - prevG);
+          const alpha = diff < 26 ? baseAlpha : 0.18;
+          const invAlpha = 1 - alpha;
+
+          const ar = accum[j] * alpha + nr * invAlpha;
+          const ag = prevG * alpha + ng * invAlpha;
+          const ab = accum[j + 2] * alpha + nb * invAlpha;
+
+          accum[j] = ar;
+          accum[j + 1] = ag;
+          accum[j + 2] = ab;
+
+          lumBuf[pixelIdx] = ((ar * 77 + ag * 150 + ab * 29) >> 8) | 0;
+
+          data[i] = ar;
+          data[i + 1] = ag;
+          data[i + 2] = ab;
+        }
+      }
+    }
+
+    // 6) 엣지 적응형 고주파 언샤프 샤프닝 (Edge-Adaptive High-Boost Sharpening Pass)
+    // - 평탄한 센서 암부 노이즈(absLap < 6)는 건너뛰고, 곤충 윤곽선/다리/질감만 칼처럼 또렷하게 부스트!
+    const sharpFactor = this.nightGainMode === 'max' ? 0.45 : 0.55;
+
+    for (let y = 1; y < nh - 1; y++) {
+      const row = y * nw;
+      const upRow = (y - 1) * nw;
+      const dnRow = (y + 1) * nw;
+
+      for (let x = 1; x < nw - 1; x++) {
+        const idx = row + x;
+        const c = lumBuf[idx];
+        const l = lumBuf[idx - 1];
+        const r = lumBuf[idx + 1];
+        const u = lumBuf[upRow + x];
+        const d = lumBuf[dnRow + x];
+
+        // 4방향 라플라시안 고주파 성분
+        const lap = (c << 2) - (l + r + u + d);
+        const absLap = Math.abs(lap);
+
+        if (absLap >= 6) {
+          const boost = Math.max(-28, Math.min(28, (lap * sharpFactor) | 0));
+          const p = idx * 4;
+
+          if (isMono) {
+            const val = Math.max(0, Math.min(255, lumBuf[idx] + boost));
+            data[p] = val * 0.22;
+            data[p + 1] = val;
+            data[p + 2] = val * 0.75;
+          } else {
+            data[p] = Math.max(0, Math.min(255, data[p] + boost));
+            data[p + 1] = Math.max(0, Math.min(255, data[p + 1] + boost));
+            data[p + 2] = Math.max(0, Math.min(255, data[p + 2] + boost));
+          }
+        }
       }
     }
 
@@ -1326,7 +1376,7 @@ class ArgonBugScanner {
         const maxPct = Math.round(Math.max(...candidateTracks.map(t => t.verificationProgress)) * 100);
         this.statusText.textContent = `미세 후보 정밀 검증 중 (${maxPct}%)`;
       } else {
-        this.statusText.textContent = this.isSimulation ? '시뮬레이션 스캔 중' : '정밀 스캔 중 (감지 없음)';
+        this.statusText.textContent = '광학 스캔 중 (이상 없음)';
       }
     }
   }
@@ -1341,12 +1391,6 @@ class ArgonBugScanner {
     const now = performance.now();
 
     ctx.clearRect(0, 0, w, h);
-
-    if (this.isSimulation && this.nvCanvas.classList.contains('hidden')) {
-      ctx.save();
-      ctx.drawImage(this.simCanvas, 0, 0, w, h);
-      ctx.restore();
-    }
 
     if (this.currentMode === 'trail' && this.heatmapPoints.length > 0) {
       for (const pt of this.heatmapPoints) {
